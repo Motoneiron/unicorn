@@ -204,7 +204,7 @@ class Engine:
                 self.store.unsee(sid)
                 self._last_ltf.pop(pair, None)
                 return
-        await self.notify(limit_card(rec))
+        await self.notify(limit_card(rec, await self._balance()))
 
     async def _place_live(self, rec: dict) -> bool:
         pair = rec["symbol"]
@@ -337,7 +337,7 @@ class Engine:
         pos["tpsl_ok"] = True
         self.store.drop_pending(rec["id"])
         self.store.add_position(pos)
-        await self.notify(fill_card(pos))
+        await self.notify(fill_card(pos, await self._balance()))
 
     async def _paper_roundtrip(self, rec: dict, reason: str, bar_iso: str) -> None:
         pos = self._position_from(rec, rec["qty"], rec["entry"], paper=True)
@@ -352,7 +352,7 @@ class Engine:
         self.store.drop_pending(rec["id"])
         self.store.add_position(pos)
         await self._arm_tpsl(pos)
-        await self.notify(fill_card(pos))
+        await self.notify(fill_card(pos, await self._balance()))
         if not pos.get("tpsl_ok"):
             await self.notify(protection_alert(pos))
 
@@ -410,7 +410,9 @@ class Engine:
         else:
             self.store.save()
         self._journal(pos, reason, exit_px, net, fees)
-        await self.notify(close_card(pos, reason, exit_px, gross, fees, net))
+        await self.notify(
+            close_card(pos, reason, exit_px, gross, fees, net, await self._balance())
+        )
 
     async def _watch_live_pos(self, pos: dict) -> None:
         if not pos.get("tpsl_ok"):
@@ -492,7 +494,9 @@ class Engine:
         gross = net + fees
         self.store.drop_position(pos["id"])
         self._journal(pos, reason, exit_px, net, fees)
-        await self.notify(close_card(pos, reason, exit_px, gross, fees, net))
+        await self.notify(
+            close_card(pos, reason, exit_px, gross, fees, net, await self._balance())
+        )
 
     def _reason_from_exit(self, pos: dict, exit_px: float) -> str:
         if pos["side"] == 1:
@@ -533,11 +537,11 @@ class Engine:
         return await self.ex.balance()
 
     def status_text(self) -> str:
-        from bot.messages import direction, instrument, mode_prefix, price
+        from bot.messages import balance_line, direction, instrument, mode_prefix, price
         head = mode_prefix(self.paper)
         if self.paused:
             head += "  сканер на паузе"
-        lines = [head]
+        lines = [head, balance_line(self.store.balance)]
         if not self.store.pending and not self.store.positions:
             lines.append("Лимиток и позиций нет.")
         for rec in self.store.pending:

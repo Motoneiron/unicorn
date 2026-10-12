@@ -10,6 +10,10 @@ from bot.rules import fmt_px
 TF = "15m → 4H"
 
 
+def balance_line(balance: float) -> str:
+    return f"💼 Баланс: {float(balance):.2f} USDT"
+
+
 def mode_prefix(paper: bool) -> str:
     return "🧪 SHADOW" if paper else "🔴 LIVE"
 
@@ -63,11 +67,11 @@ def _num(rec: dict) -> str:
     return str(n) if n else "?"
 
 
-def limit_card(rec: dict) -> str:
+def limit_card(rec: dict, balance: float | None = None) -> str:
     pair = rec["symbol"]
     side = int(rec["side"])
     entry, stop, tp = float(rec["entry"]), float(rec["stop"]), float(rec["tp"])
-    return (
+    text = (
         f"{mode_prefix(bool(rec.get('paper', True)))} {arrow(side)} {direction(side)} "
         f"#{_num(rec)} — заявка\n"
         f"Сигнал найден, заявка выставлена, ожидаем вход\n"
@@ -78,9 +82,12 @@ def limit_card(rec: dict) -> str:
         f"R:R={_rr(entry, stop, tp):.2f}\n"
         f"Ожидание входа: 2ч  |  позиция: до стопа или тейка"
     )
+    if balance is not None:
+        text += f"\n{balance_line(balance)}"
+    return text
 
 
-def fill_card(pos: dict) -> str:
+def fill_card(pos: dict, balance: float | None = None) -> str:
     pair = pos["symbol"]
     side = int(pos["side"])
     entry, stop, tp = float(pos["entry"]), float(pos["stop"]), float(pos["tp"])
@@ -94,15 +101,16 @@ def fill_card(pos: dict) -> str:
         f"Вход: {price(pair, entry)} | Стоп: {price(pair, stop)} | Тейк: {price(pair, tp)}\n"
         f"Риск: {risk:.2f} USDT ({float(RISK_PCT):.1f}%)"
     )
-    if pos.get("tpsl_ok", True):
-        return text
-    sl_pct = abs(stop - entry) / entry * 100 if entry else 0.0
-    tp_pct = abs(tp - entry) / entry * 100 if entry else 0.0
-    return (
-        text
-        + f"\n🛑 Стоп: {price(pair, stop)} ({sl_pct:.2f}%) — ❌ НЕ выставлен!"
-        + f"\n💰 Тейк: {price(pair, tp)} ({tp_pct:.2f}%) — ❌ НЕ выставлен!"
-    )
+    if not pos.get("tpsl_ok", True):
+        sl_pct = abs(stop - entry) / entry * 100 if entry else 0.0
+        tp_pct = abs(tp - entry) / entry * 100 if entry else 0.0
+        text += (
+            f"\n🛑 Стоп: {price(pair, stop)} ({sl_pct:.2f}%) — ❌ НЕ выставлен!"
+            f"\n💰 Тейк: {price(pair, tp)} ({tp_pct:.2f}%) — ❌ НЕ выставлен!"
+        )
+    if balance is not None:
+        text += f"\n{balance_line(balance)}"
+    return text
 
 
 def protection_alert(pos: dict) -> str:
@@ -119,6 +127,7 @@ def close_card(
     gross: float,
     fees: float,
     net: float,
+    balance: float | None = None,
 ) -> str:
     pair = pos["symbol"]
     side = int(pos["side"])
@@ -129,7 +138,7 @@ def close_card(
     n_pct = net / margin * 100 if margin > 0 else 0.0
     ico = {"tp": "🟢", "sl": "🔴"}.get(reason, "⚪")
     title = {"tp": "ТЕЙК ПРОФИТ", "sl": "СТОП ЛОСС"}.get(reason, "ЗАКРЫТА НА БИРЖЕ")
-    return (
+    text = (
         f"{mode_prefix(bool(pos.get('paper', True)))} {ico} #{_num(pos)} {title} "
         f"{arrow(side)} {direction(side)}\n"
         f"Инструмент: {instrument(pair)}\n"
@@ -139,6 +148,9 @@ def close_card(
         f"Fees:  −{fees:.2f} USDT\n"
         f"Net:   {net:+.2f} USDT  ({n_pct:+.1f}%)"
     )
+    if balance is not None:
+        text += f"\n{balance_line(balance)}"
+    return text
 
 
 def cancel_card(rec: dict, why: str) -> str:
