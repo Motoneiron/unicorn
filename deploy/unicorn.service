@@ -1,0 +1,16 @@
+[Unit]
+Description=Unicorn Bybit bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/unicorn
+ExecStart=/opt/unicorn/venv/bin/python3 /opt/unicorn/unicorn_bot.py
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+Environment=TELEGRAM_PROXY=http://127.0.0.1:8790
+
+[Install]
+WantedBy=multi-user.target
