@@ -66,19 +66,17 @@ async def _sender() -> None:
             await asyncio.sleep(1)
             await _queue.put(text)
             continue
-        delivered = False
-        for attempt in range(3):
+        delay = 2
+        while True:
             try:
                 await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text[:4096])
-                delivered = True
+                logger.info("телеграм: сообщение ушло")
                 break
-            except Exception:
-                logger.exception("телеграм, попытка %s", attempt + 1)
-                await asyncio.sleep(2)
-        if delivered:
-            logger.info("телеграм: сообщение ушло")
-        else:
-            logger.error("телеграм: сообщение не ушло")
+            except Exception as exc:
+                logger.warning("телеграм не ушёл, повтор через %s с: %s", delay, exc)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
+                bot = _tg_bot or bot
 
 
 async def _telegram_loop(engine: Engine) -> None:
