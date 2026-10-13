@@ -86,6 +86,16 @@ def find_setups(
     )
     htf = det.resample_to_htf(m15)
     sweeps = det.detect_htf_sweeps(htf, m15)
+
+    # ФИКС 13.10.2026: для каждого бара-триггера — САМЫЙ СВЕЖИЙ свип (каскады),
+    # и правило: триггер обязан лежать внутри своей свечи свипа.
+    newest_by_trig: dict[tuple, pd.Timestamp] = {}
+    for w in sweeps:
+        k = (w["type"], int(w["trigger_idx"]))
+        t = pd.Timestamp(w["htf_time"])
+        if k not in newest_by_trig or t > newest_by_trig[k]:
+            newest_by_trig[k] = t
+
     stats = {
         "sweeps": len(sweeps),
         "down": 0,
@@ -95,6 +105,7 @@ def find_setups(
         "no_mss": 0,
         "extremum": 0,
         "no_fvg": 0,
+        "skip_out": 0,
         "kept": 0,
     }
     setups: list[dict] = []
@@ -109,6 +120,12 @@ def find_setups(
         else:
             stats["up"] += 1
         trigger = int(sweep["trigger_idx"])
+        # ФИКС: якорь = самый свежий свип этого триггера; триггер должен быть в его свече.
+        htf_time = newest_by_trig[(sweep["type"], trigger)]
+        a_i = int(m15.index.searchsorted(htf_time, side="left"))
+        if not (0 <= trigger - a_i < 16):
+            stats["skip_out"] += 1
+            continue
         if long_side:
             series = det.find_bearish_series(m15, trigger)
             level_key = "max_open"
@@ -128,7 +145,7 @@ def find_setups(
             trigger,
             level,
             is_bearish=not long_side,
-            htf_anchor=pd.Timestamp(sweep["htf_time"]),
+            htf_anchor=htf_time,
         )
         if mss is None:
             stats["no_mss"] += 1
@@ -169,7 +186,7 @@ def find_setups(
                 "h4": 0,
                 "zone_bot": zone[0],
                 "zone_top": zone[1],
-                "h4_sweep_at": pd.Timestamp(sweep["htf_time"]),
+                "h4_sweep_at": htf_time,
             }
         )
         stats["kept"] += 1
