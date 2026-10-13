@@ -333,6 +333,7 @@ class Engine:
 
     async def _open_paper(self, rec: dict, bar_iso: str) -> None:
         pos = self._position_from(rec, rec["qty"], rec["entry"], paper=True)
+        pos["opened"] = bar_iso
         pos["last_1m"] = bar_iso
         pos["tpsl_ok"] = True
         self.store.drop_pending(rec["id"])

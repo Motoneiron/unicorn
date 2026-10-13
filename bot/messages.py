@@ -47,6 +47,20 @@ def clock(raw: str) -> str:
         return str(raw)[:16]
 
 
+def moscow_hm(raw: str) -> str:
+    if not raw:
+        return ""
+    try:
+        ts = pd.Timestamp(raw)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.tz_convert("Europe/Moscow").strftime("%H:%M")
+    except Exception:
+        return ""
+
+
 def _signal_line(rec: dict) -> str:
     sig = clock(str(rec.get("signal_time") or rec.get("mss_open") or ""))
     htf = clock(str(rec.get("htf_time") or ""))
@@ -92,9 +106,11 @@ def fill_card(pos: dict, balance: float | None = None) -> str:
     side = int(pos["side"])
     entry, stop, tp = float(pos["entry"]), float(pos["stop"]), float(pos["tp"])
     risk = abs(entry - stop) * float(pos["qty"])
+    when = moscow_hm(str(pos.get("opened") or pos.get("last_1m") or ""))
+    enter = f"вход ({when} МСК)" if when else "вход"
     text = (
         f"🟢 {mode_prefix(bool(pos.get('paper', True)))} {arrow(side)} {direction(side)} "
-        f"#{_num(pos)} — вход\n"
+        f"#{_num(pos)} — {enter}\n"
         f"Инструмент: {instrument(pair)}\n"
         f"ТФ: {TF}\n"
         f"{_signal_line(pos)}\n"
