@@ -85,9 +85,11 @@ def limit_card(rec: dict, balance: float | None = None) -> str:
     pair = rec["symbol"]
     side = int(rec["side"])
     entry, stop, tp = float(rec["entry"]), float(rec["stop"]), float(rec["tp"])
+    when = moscow_hm(str(rec.get("signal_time") or rec.get("mss_open") or ""))
+    title = f"заявка ({when} МСК)" if when else "заявка"
     text = (
         f"{mode_prefix(bool(rec.get('paper', True)))} {arrow(side)} {direction(side)} "
-        f"#{_num(rec)} — заявка\n"
+        f"#{_num(rec)} — {title}\n"
         f"Сигнал найден, заявка выставлена, ожидаем вход\n"
         f"Инструмент: {instrument(pair)}\n"
         f"ТФ: {TF}\n"
