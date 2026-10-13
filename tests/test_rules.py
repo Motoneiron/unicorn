@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from bot.rules import (
+    atr14,
     drop_forming,
     entry_deadline,
     exit_price,
@@ -18,6 +19,7 @@ from bot.rules import (
     position_hit,
     position_qty,
     round_levels,
+    sizing_weight,
     time_exit_due,
     trigger_stop,
 )
@@ -73,6 +75,49 @@ def test_drop_forming():
 def test_qty_and_levels():
     assert position_qty(100, 100, 99, 0.1) == 1.0
     assert round_levels(1, 100.014, 99.006, 0.01) == (100.01, 99.0, 102.03)
+    assert position_qty(1000, 100, 99, 0.1, risk_pct=1.0) == 10.0
+    assert position_qty(1000, 100, 99, 0.1, risk_pct=1.5) == 15.0
+
+
+def test_sizing_weight():
+    cases = [
+        (1.5, 1.5),
+        (1.89, 1.5),
+        (1.9, 1.25),
+        (2.27, 1.25),
+        (2.28, 1.0),
+        (2.72, 1.0),
+        (2.73, 0.75),
+        (3.38, 0.75),
+        (3.39, 0.5),
+        (10, 0.5),
+        (None, 1.0),
+        (float("nan"), 1.0),
+        (0, 1.0),
+        (-3, 1.0),
+    ]
+    for raw, expect in cases:
+        assert sizing_weight(raw) == expect, (raw, sizing_weight(raw), expect)
+
+
+def test_atr14_flat_and_spike():
+    n = 20
+    high = np.full(n, 2.0)
+    low = np.full(n, 1.0)
+    close = np.full(n, 1.5)
+    atr = atr14(high, low, close)
+    assert np.isnan(atr[12])
+    assert abs(atr[13] - 1.0) < 1e-12
+    assert abs(atr[19] - 1.0) < 1e-12
+
+    high2 = high.copy()
+    high2[15] = 5.0  # TR = max(4, |5-1.5|, |1-1.5|) = 4
+    atr2 = atr14(high2, low, close)
+    # RMA: atr[14]=1; atr[15]=(1*13+4)/14
+    expect15 = (1.0 * 13 + 4.0) / 14
+    assert abs(atr2[15] - expect15) < 1e-12
+    expect16 = (expect15 * 13 + 1.0) / 14
+    assert abs(atr2[16] - expect16) < 1e-12
 
 
 def test_trigger_stop():
@@ -110,6 +155,8 @@ def main():
     test_deadline_is_two_hours_after_close()
     test_drop_forming()
     test_qty_and_levels()
+    test_sizing_weight()
+    test_atr14_flat_and_spike()
     test_trigger_stop()
     test_time_exit_due()
     test_time_exit_price_is_taker_with_slip()

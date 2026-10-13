@@ -42,6 +42,11 @@ TAKER = 0.001
 SLIP = 0.00010
 
 RISK_PCT = float(os.environ.get("RISK_PCT", "1"))
+# Сайзинг по компактности сетапа (stop/ATR): границы квинтилей по IS 2020-23,
+# веса из исследования (results/ROUND2_RESULTS.md). SIZING=0 в env — выключить.
+SIZING_ON = os.environ.get("SIZING", "1").strip().lower() not in ("0", "false", "no")
+SIZING_BOUNDS = (1.89, 2.27, 2.72, 3.38)
+SIZING_WEIGHTS = (1.5, 1.25, 1.0, 0.75, 0.5)
 LEVERAGE = int(os.environ.get("LEVERAGE", "20"))
 PAPER_BALANCE = float(os.environ.get("PAPER_BALANCE", "100"))
 MIN_NOTIONAL = 5.0

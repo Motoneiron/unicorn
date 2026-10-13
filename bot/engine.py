@@ -24,6 +24,7 @@ from bot.config import (
     RISK_PCT,
     RR,
     SCAN_S,
+    SIZING_ON,
     TIME_EXIT_H,
     WATCH_M1,
 )
@@ -37,6 +38,7 @@ from bot.messages import (
     protection_alert,
 )
 from bot.rules import (
+    atr14,
     drop_forming,
     entry_deadline,
     exit_price,
@@ -50,6 +52,7 @@ from bot.rules import (
     round_levels,
     setup_id,
     side_name,
+    sizing_weight,
     time_exit_due,
     trigger_stop,
     utc_naive,
@@ -134,6 +137,7 @@ class Engine:
             return
         self._last_ltf[pair] = _iso(df.index[-1])
         setups, stats = await asyncio.to_thread(find_setups, df)
+        atr = atr14(df["high"], df["low"], df["close"])
         logger.info("%s закрытый 15м %s, сетапов в окне %s", pair, self._last_ltf[pair], stats.get("kept"))
         now = utc_naive()
         found = []
@@ -155,7 +159,16 @@ class Engine:
                 logger.exception("%s невалидный sweep_i у сетапа", pair)
                 self.store.mark_seen(sid, utc_naive().isoformat())
                 continue
-            await self._consider(pair, setup, mss_open, sid, trig)
+            atr_value = None
+            try:
+                form_i = int(setup["form_i"])
+                if 0 <= form_i < len(atr):
+                    raw_atr = float(atr[form_i])
+                    if raw_atr == raw_atr and raw_atr > 0:  # not NaN
+                        atr_value = raw_atr
+            except (KeyError, TypeError, ValueError):
+                atr_value = None
+            await self._consider(pair, setup, mss_open, sid, trig, atr_value)
 
     async def _consider(
         self,
@@ -164,6 +177,7 @@ class Engine:
         mss_open: pd.Timestamp,
         sid: str,
         trig_stop: float,
+        atr_value: float | None = None,
     ) -> None:
         side = int(setup["side"])
         profile = PAIRS[pair]
@@ -179,8 +193,14 @@ class Engine:
             self.store.mark_seen(sid, utc_naive().isoformat())
             logger.info("%s цена уже забирала лимитку, пока бот не смотрел. Не догоняю", pair)
             return
+        stop_atr = abs(entry - stop) / atr_value if atr_value else None
+        w = sizing_weight(stop_atr) if SIZING_ON else 1.0
         bal = await self._balance()
-        qty = position_qty(bal, entry, stop, profile["qty_step"])
+        qty = position_qty(bal, entry, stop, profile["qty_step"], risk_pct=RISK_PCT * w)
+        if stop_atr is not None:
+            logger.info("%s sizing ×%s stop/ATR %.2f", pair, w, stop_atr)
+        else:
+            logger.info("%s sizing ×%s stop/ATR —", pair, w)
         if qty <= 0:
             logger.info("%s размер меньше минимума биржи, баланс %s", pair, round(bal, 2))
             return
@@ -198,6 +218,8 @@ class Engine:
             "stop": stop,
             "tp": tp,
             "qty": qty,
+            "risk_pct": round(RISK_PCT * w, 3),
+            "stop_atr": round(stop_atr, 2) if stop_atr else None,
             "mss_open": _iso(mss_open),
             "signal_time": _iso(mss_open),
             "htf_time": htf_s,

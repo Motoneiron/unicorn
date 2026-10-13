@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 
 from bot.config import (
@@ -19,6 +20,8 @@ from bot.config import (
     MAKER,
     TAKER,
     TIME_EXIT_H,
+    SIZING_BOUNDS,
+    SIZING_WEIGHTS,
 )
 
 
@@ -107,6 +110,43 @@ def time_exit_due(opened, now=None) -> bool:
     start = pd.Timestamp(opened)
     stamp = utc_naive() if now is None else pd.Timestamp(now)
     return stamp >= start + pd.Timedelta(hours=float(TIME_EXIT_H))
+
+
+def atr14(high, low, close) -> np.ndarray:
+    """ATR(14) по Уайлдеру (RMA): SMA первых 14 TR, далее ATR=(ATR*13+TR)/14.
+
+    Возвращает массив с NaN до 14-го бара. Те же числа, что в исследовании.
+    """
+    hi = np.asarray(high, dtype=float)
+    lo = np.asarray(low, dtype=float)
+    cl = np.asarray(close, dtype=float)
+    prev = np.concatenate([[cl[0]], cl[:-1]]) if len(cl) else cl
+    tr = np.maximum(hi - lo, np.maximum(np.abs(hi - prev), np.abs(lo - prev)))
+    n = 14
+    out = np.empty_like(tr, dtype=float)
+    out[:] = np.nan
+    if len(tr) < n:
+        return out
+    out[n - 1] = float(tr[:n].mean())
+    for i in range(n, len(tr)):
+        out[i] = (out[i - 1] * (n - 1) + tr[i]) / n
+    return out
+
+
+def sizing_weight(stop_atr) -> float:
+    """Множитель риска по stop/ATR. None/NaN/<=0 -> 1.0 (нейтрально)."""
+    if stop_atr is None:
+        return 1.0
+    try:
+        x = float(stop_atr)
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(x) or x <= 0:
+        return 1.0
+    for bound, weight in zip(SIZING_BOUNDS, SIZING_WEIGHTS[:-1]):
+        if x <= bound:
+            return float(weight)
+    return float(SIZING_WEIGHTS[-1])
 
 
 def position_hit(side: int, stop: float, tp: float, low: float, high: float) -> str | None:
