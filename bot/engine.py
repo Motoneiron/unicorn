@@ -24,6 +24,7 @@ from bot.config import (
     RISK_PCT,
     RR,
     SCAN_S,
+    TIME_EXIT_H,
     WATCH_M1,
 )
 from bot.exchange import Bybit
@@ -49,6 +50,8 @@ from bot.rules import (
     round_levels,
     setup_id,
     side_name,
+    time_exit_due,
+    trigger_stop,
     utc_naive,
     window_bars,
 )
@@ -99,7 +102,7 @@ class Engine:
         return (
             f"Единорог запущен. {mode}.\n"
             f"9 пар, 15м на 4ч, лимитка {ENTRY_MIN // 60} ч, тейк {fmt_num(RR, 0)}R, "
-            f"выход только по стопу или тейку.\n"
+            f"выход по стопу, тейку или времени ({TIME_EXIT_H:g} ч).\n"
             f"Риск {fmt_num(RISK_PCT, 1)}% на сделку, плечо {LEVERAGE}x."
         )
 
@@ -146,12 +149,25 @@ class Engine:
         for mss_open, setup, sid in found:
             if self.store.busy(pair):
                 break
-            await self._consider(pair, setup, mss_open, sid)
+            try:
+                trig = trigger_stop(df, setup)
+            except (KeyError, IndexError, TypeError, ValueError):
+                logger.exception("%s невалидный sweep_i у сетапа", pair)
+                self.store.mark_seen(sid, utc_naive().isoformat())
+                continue
+            await self._consider(pair, setup, mss_open, sid, trig)
 
-    async def _consider(self, pair: str, setup: dict, mss_open: pd.Timestamp, sid: str) -> None:
+    async def _consider(
+        self,
+        pair: str,
+        setup: dict,
+        mss_open: pd.Timestamp,
+        sid: str,
+        trig_stop: float,
+    ) -> None:
         side = int(setup["side"])
         profile = PAIRS[pair]
-        levels = round_levels(side, float(setup["entry"]), float(setup["stop"]), profile["price_tick"])
+        levels = round_levels(side, float(setup["entry"]), float(trig_stop), profile["price_tick"])
         if levels is None:
             self.store.mark_seen(sid, utc_naive().isoformat())
             return
@@ -159,10 +175,6 @@ class Engine:
         m1 = drop_forming(await self.ex.ohlcv(pair, "1m", M1_BARS), 1)
         bars = window_bars(m1, mss_close(mss_open), entry_deadline(mss_open))
         kind, _idx = first_entry_event(side, entry, stop, bars["low"], bars["high"])
-        if kind == "ran":
-            self.store.mark_seen(sid, utc_naive().isoformat())
-            logger.info("%s 2R уже был до входа, пропуск", pair)
-            return
         if kind == "fill":
             self.store.mark_seen(sid, utc_naive().isoformat())
             logger.info("%s цена уже забирала лимитку, пока бот не смотрел. Не догоняю", pair)
@@ -264,9 +276,6 @@ class Engine:
                 kind, _idx = first_entry_event(
                     rec["side"], rec["entry"], rec["stop"], [row["low"]], [row["high"]],
                 )
-                if kind == "ran":
-                    await self._cancel_ran(rec)
-                    return
                 if kind == "fill":
                     hit = position_hit(rec["side"], rec["stop"], rec["tp"], row["low"], row["high"])
                     if hit:
@@ -289,9 +298,6 @@ class Engine:
         rec["px_min"] = lo
         rec["px_max"] = hi
         kind, _idx = first_entry_event(rec["side"], rec["entry"], rec["stop"], [lo], [hi])
-        if kind == "ran":
-            await self._cancel_ran(rec)
-            return True
         if kind == "fill":
             hit = position_hit(rec["side"], rec["stop"], rec["tp"], lo, hi)
             if hit:
@@ -313,9 +319,6 @@ class Engine:
                 rec["side"], rec["entry"], rec["stop"], [row["low"]], [row["high"]],
             )
             rec["last_1m"] = _iso(ts)
-            if kind == "ran":
-                await self._cancel_ran(rec)
-                return
             if kind == "fill" and rec["paper"]:
                 hit = position_hit(rec["side"], rec["stop"], rec["tp"], row["low"], row["high"])
                 if hit:
@@ -367,24 +370,6 @@ class Engine:
                 return
         self.store.drop_pending(rec["id"])
         await self.notify(cancel_card(rec, "2 часа вышли"))
-
-    async def _cancel_ran(self, rec: dict) -> None:
-        if not rec["paper"] and rec.get("order_id"):
-            fill = await self._live_fill(rec)
-            if fill is not None:
-                await self._open_live(rec, fill[0], fill[1])
-                return
-            try:
-                await self.ex.cancel(rec["symbol"], rec["order_id"])
-            except Exception:
-                fill = await self._live_fill(rec)
-                if fill is not None:
-                    await self._open_live(rec, fill[0], fill[1])
-                    return
-                logger.exception("не снял лимитку после 2R %s", rec["symbol"])
-                return
-        self.store.drop_pending(rec["id"])
-        await self.notify(cancel_card(rec, "2R без входа"))
 
     async def _open_paper(self, rec: dict, bar_iso: str) -> None:
         pos = self._position_from(rec, rec["qty"], rec["entry"], paper=True)
@@ -462,30 +447,46 @@ class Engine:
             raw = await self.ex.ohlcv(pos["symbol"], "1m", WATCH_M1)
         except Exception:
             logger.exception("минутки позиции %s", pos.get("symbol"))
-            return
-        m1 = drop_forming(raw, 1)
-        start = _ts(pos["last_1m"]) + pd.Timedelta(minutes=1) if pos.get("last_1m") else _ts(pos["opened"])
-        bars = window_bars(m1, start, utc_naive() + pd.Timedelta(minutes=1))
-        if bars is not None and len(bars):
-            for ts, row in bars.iterrows():
-                hit = position_hit(pos["side"], pos["stop"], pos["tp"], row["low"], row["high"])
-                pos["last_1m"] = _iso(ts)
-                if hit:
-                    await self._close_paper(pos, hit, keep=True)
-                    return
-            self.store.save()
+            raw = None
+        m1 = drop_forming(raw, 1) if raw is not None else None
+        if raw is not None:
+            start = _ts(pos["last_1m"]) + pd.Timedelta(minutes=1) if pos.get("last_1m") else _ts(pos["opened"])
+            bars = window_bars(m1, start, utc_naive() + pd.Timedelta(minutes=1))
+            if bars is not None and len(bars):
+                for ts, row in bars.iterrows():
+                    hit = position_hit(pos["side"], pos["stop"], pos["tp"], row["low"], row["high"])
+                    pos["last_1m"] = _iso(ts)
+                    if hit:
+                        await self._close_paper(pos, hit, keep=True)
+                        return
+                self.store.save()
 
-        # Текущая (ещё открытая) минутка — не ждём её закрытия.
-        if len(raw):
-            last_ts = raw.index[-1]
-            if not len(m1) or last_ts > m1.index[-1]:
-                row = raw.iloc[-1]
-                hit = position_hit(pos["side"], pos["stop"], pos["tp"], row["low"], row["high"])
-                if hit:
-                    await self._close_paper(pos, hit, keep=True)
+            # Текущая (ещё открытая) минутка — не ждём её закрытия.
+            if len(raw):
+                last_ts = raw.index[-1]
+                if m1 is None or not len(m1) or last_ts > m1.index[-1]:
+                    row = raw.iloc[-1]
+                    hit = position_hit(pos["side"], pos["stop"], pos["tp"], row["low"], row["high"])
+                    if hit:
+                        await self._close_paper(pos, hit, keep=True)
+                        return
 
-    async def _close_paper(self, pos: dict, reason: str, keep: bool) -> None:
-        exit_px, fee_out = exit_price(pos["side"], pos["stop"], pos["tp"], reason)
+        if time_exit_due(pos["opened"]):
+            mark = px
+            if mark is None and m1 is not None and len(m1):
+                mark = float(m1.iloc[-1]["close"])
+            if mark is None:
+                return
+            await self._close_paper(pos, "time", keep=True, mark=mark)
+
+    async def _close_paper(
+        self,
+        pos: dict,
+        reason: str,
+        keep: bool,
+        mark: float | None = None,
+    ) -> None:
+        exit_px, fee_out = exit_price(pos["side"], pos["stop"], pos["tp"], reason, mark=mark)
         net, fees = pnl_usdt(pos["side"], pos["entry"], exit_px, pos["qty"], fee_out)
         gross = net + fees
         self.store.balance = self.store.balance + net
@@ -509,6 +510,14 @@ class Engine:
             if not pos.get("seen_on_exchange"):
                 pos["seen_on_exchange"] = True
                 self.store.save()
+            if time_exit_due(pos["opened"]) and not pos.get("closing_reason"):
+                pos["closing_reason"] = "time"
+                self.store.save()
+                try:
+                    await self.ex.market_close(pos["symbol"], pos["side"], qty)
+                    logger.info("выход по времени %s qty=%s", pos["symbol"], qty)
+                except Exception:
+                    logger.exception("не закрыл по времени %s", pos["symbol"])
             return
         if not pos.get("seen_on_exchange"):
             age_s = (utc_naive() - _ts(pos["opened"])).total_seconds()
@@ -571,6 +580,8 @@ class Engine:
             if px:
                 exit_px = px
                 reason = self._reason_from_exit(pos, exit_px)
+        if pos.get("closing_reason") == "time":
+            reason = "time"
         fee_out = MAKER if reason == "tp" else TAKER
         model_net, fees = pnl_usdt(pos["side"], pos["entry"], exit_px, pos["qty"], fee_out)
         if row is None:
@@ -583,6 +594,8 @@ class Engine:
         )
 
     def _reason_from_exit(self, pos: dict, exit_px: float) -> str:
+        if pos.get("closing_reason") == "time":
+            return "time"
         if pos["side"] == 1:
             if exit_px <= pos["stop"] * 1.002:
                 return "sl"

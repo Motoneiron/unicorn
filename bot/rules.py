@@ -7,7 +7,19 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from bot.config import ENTRY_MIN, LTF_MIN, MIN_NOTIONAL, MARGIN_RESERVE, RISK_PCT, LEVERAGE, RR, SLIP, MAKER, TAKER
+from bot.config import (
+    ENTRY_MIN,
+    LTF_MIN,
+    MIN_NOTIONAL,
+    MARGIN_RESERVE,
+    RISK_PCT,
+    LEVERAGE,
+    RR,
+    SLIP,
+    MAKER,
+    TAKER,
+    TIME_EXIT_H,
+)
 
 
 def utc_naive() -> pd.Timestamp:
@@ -66,20 +78,35 @@ def first_entry_event(
     lows,
     highs,
 ) -> tuple[str, int]:
-    """Как _fill_limit: на одной минутке филл важнее касания 2R."""
-    tp2 = tp2_price(side, entry, stop, 2.0)
+    """Как bt.execute._fill: первое касание входа в окне.
+
+    Фильтр 2R отключён по бэктесту — при широком стопе эффекта не даёт
+    (см. results/STOP_VARIANTS.md). Аргумент stop оставлен для совместимости вызовов.
+    """
+    del stop
     for i, (lo, hi) in enumerate(zip(lows, highs)):
         if int(side) == 1:
             filled = float(lo) <= entry
-            saw = float(hi) >= tp2
         else:
             filled = float(hi) >= entry
-            saw = float(lo) <= tp2
-        if saw and not filled:
-            return "ran", i
         if filled:
             return "fill", i
     return "miss", -1
+
+
+def trigger_stop(df, setup: dict) -> float:
+    """Стоп за лоу/хай бара-триггера (sweep_i)."""
+    trig_i = int(setup["sweep_i"])
+    if int(setup["side"]) == 1:
+        return float(df.iloc[trig_i]["low"])
+    return float(df.iloc[trig_i]["high"])
+
+
+def time_exit_due(opened, now=None) -> bool:
+    """True, если с открытия позиции прошло >= TIME_EXIT_H часов."""
+    start = pd.Timestamp(opened)
+    stamp = utc_naive() if now is None else pd.Timestamp(now)
+    return stamp >= start + pd.Timedelta(hours=float(TIME_EXIT_H))
 
 
 def position_hit(side: int, stop: float, tp: float, low: float, high: float) -> str | None:
@@ -163,12 +190,22 @@ def position_qty(
     return float(qty)
 
 
-def exit_price(side: int, stop: float, tp: float, reason: str) -> tuple[float, float]:
-    """Цена выхода и ставка комиссии. Стоп со слипом 1 б.п., тейк по лимитке."""
+def exit_price(
+    side: int,
+    stop: float,
+    tp: float,
+    reason: str,
+    mark: float | None = None,
+) -> tuple[float, float]:
+    """Цена выхода и ставка комиссии.
+
+    Тейк — лимитка (мейкер). Стоп и выход по времени — рынок: тейкер + 1 б.п. против позиции.
+    Для time mark — последняя цена; иначе берём stop.
+    """
     if reason == "tp":
         return float(tp), MAKER
-    slip_px = float(stop) * (1.0 - int(side) * SLIP)
-    return slip_px, TAKER
+    base = float(mark) if mark is not None else float(stop)
+    return base * (1.0 - int(side) * SLIP), TAKER
 
 
 def pnl_usdt(side: int, entry: float, exit_px: float, qty: float, fee_out: float) -> tuple[float, float]:

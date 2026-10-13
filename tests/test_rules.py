@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Правила входа совпадают с бэктестом."""
+"""Правила входа совпадают с бэктестом нового стека."""
 from __future__ import annotations
 
 import sys
@@ -13,12 +13,15 @@ import pandas as pd
 from bot.rules import (
     drop_forming,
     entry_deadline,
+    exit_price,
     first_entry_event,
     position_hit,
     position_qty,
     round_levels,
+    time_exit_due,
+    trigger_stop,
 )
-from bt.execute import _fill_limit, _walk
+from bt.execute import TAKER, _fill, _walk
 
 
 def test_parity():
@@ -29,8 +32,11 @@ def test_parity():
             lows = entry + rng.normal(0, span, 40)
             highs = lows + rng.random(40) * span
             got = first_entry_event(side, entry, stop, lows, highs)
-            exp = _fill_limit(side, entry, stop, lows, highs, 0, len(lows))
-            assert got == exp, (got, exp)
+            exp_i = _fill(side, entry, np.asarray(lows, float), np.asarray(highs, float), 0, len(lows))
+            if exp_i < 0:
+                assert got == ("miss", -1), (got, exp_i)
+            else:
+                assert got == ("fill", exp_i), (got, exp_i)
 
 
 def test_same_bar_fill_beats_2r():
@@ -38,9 +44,9 @@ def test_same_bar_fill_beats_2r():
     assert (kind, idx) == ("fill", 0)
 
 
-def test_2r_before_fill_cancels():
+def test_2r_before_fill_does_not_cancel():
     kind, idx = first_entry_event(1, 100.0, 99.0, [100.5, 100.0], [102.0, 100.2])
-    assert (kind, idx) == ("ran", 0)
+    assert (kind, idx) == ("fill", 1)
 
 
 def test_stop_before_tp():
@@ -69,14 +75,44 @@ def test_qty_and_levels():
     assert round_levels(1, 100.014, 99.006, 0.01) == (100.01, 99.0, 102.03)
 
 
+def test_trigger_stop():
+    df = pd.DataFrame(
+        {
+            "open": [10.0, 10.1, 10.2],
+            "high": [10.5, 10.4, 10.8],
+            "low": [9.8, 9.5, 10.0],
+            "close": [10.2, 9.7, 10.6],
+        }
+    )
+    long_setup = {"side": 1, "sweep_i": 1}
+    short_setup = {"side": -1, "sweep_i": 2}
+    assert trigger_stop(df, long_setup) == 9.5
+    assert trigger_stop(df, short_setup) == 10.8
+
+
+def test_time_exit_due():
+    opened = pd.Timestamp("2026-01-01 12:00")
+    assert time_exit_due(opened, now=opened + pd.Timedelta(hours=5, minutes=59)) is False
+    assert time_exit_due(opened, now=opened + pd.Timedelta(hours=6, minutes=1)) is True
+
+
+def test_time_exit_price_is_taker_with_slip():
+    px, fee = exit_price(1, 99.0, 102.0, "time", mark=100.0)
+    assert fee == TAKER
+    assert abs(px - 100.0 * (1.0 - 0.0001)) < 1e-12
+
+
 def main():
     test_parity()
     test_same_bar_fill_beats_2r()
-    test_2r_before_fill_cancels()
+    test_2r_before_fill_does_not_cancel()
     test_stop_before_tp()
     test_deadline_is_two_hours_after_close()
     test_drop_forming()
     test_qty_and_levels()
+    test_trigger_stop()
+    test_time_exit_due()
+    test_time_exit_price_is_taker_with_slip()
     print("ok")
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from bot.config import LEVERAGE, PAIRS, RISK_PCT
+from bot.config import LEVERAGE, PAIRS, RISK_PCT, TIME_EXIT_H
 from bot.rules import fmt_px
 
 TF = "15m → 4H"
@@ -96,7 +96,7 @@ def limit_card(rec: dict, balance: float | None = None) -> str:
         f"{_signal_line(rec)}\n"
         f"Вход: {price(pair, entry)} | Стоп: {price(pair, stop)} | Тейк: {price(pair, tp)}\n"
         f"R:R={_rr(entry, stop, tp):.2f}\n"
-        f"Ожидание входа: 2ч  |  позиция: до стопа или тейка"
+        f"Ожидание входа: 2ч  |  позиция: до стопа, тейка или {TIME_EXIT_H:g}ч"
     )
     if balance is not None:
         text += f"\n{balance_line(balance)}"
@@ -154,8 +154,12 @@ def close_card(
     margin = entry * qty / LEVERAGE if LEVERAGE else 0.0
     g_pct = gross / margin * 100 if margin > 0 else 0.0
     n_pct = net / margin * 100 if margin > 0 else 0.0
-    ico = {"tp": "🟢", "sl": "🔴"}.get(reason, "⚪")
-    title = {"tp": "ТЕЙК ПРОФИТ", "sl": "СТОП ЛОСС"}.get(reason, "ЗАКРЫТА НА БИРЖЕ")
+    ico = {"tp": "🟢", "sl": "🔴", "time": "⏱"}.get(reason, "⚪")
+    title = {
+        "tp": "ТЕЙК ПРОФИТ",
+        "sl": "СТОП ЛОСС",
+        "time": "ВЫХОД ПО ВРЕМЕНИ",
+    }.get(reason, "ЗАКРЫТА НА БИРЖЕ")
     text = (
         f"{mode_prefix(bool(pos.get('paper', True)))} {ico} #{_num(pos)} {title} "
         f"{arrow(side)} {direction(side)}\n"
