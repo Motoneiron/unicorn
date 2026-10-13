@@ -532,7 +532,8 @@ class Engine:
             if not pos.get("seen_on_exchange"):
                 pos["seen_on_exchange"] = True
                 self.store.save()
-            if time_exit_due(pos["opened"]) and not pos.get("closing_reason"):
+            if time_exit_due(pos["opened"]):
+                # Повторяем market_close, даже если прошлый тик уже пометил closing_reason.
                 pos["closing_reason"] = "time"
                 self.store.save()
                 try:
