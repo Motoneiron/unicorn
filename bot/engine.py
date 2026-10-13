@@ -24,6 +24,7 @@ from bot.config import (
     RISK_PCT,
     RR,
     SCAN_S,
+    WATCH_M1,
 )
 from bot.exchange import Bybit
 from bot.messages import (
@@ -239,13 +240,67 @@ class Engine:
             if fill is not None:
                 await self._open_live(rec, fill[0], fill[1])
                 return
-        m1 = drop_forming(await self.ex.ohlcv(rec["symbol"], "1m", M1_BARS), 1)
+        else:
+            if await self._paper_limit_live(rec):
+                return
+        try:
+            raw = await self.ex.ohlcv(rec["symbol"], "1m", WATCH_M1)
+        except Exception:
+            logger.exception("минутки лимитки %s", rec.get("symbol"))
+            if any(p["id"] == rec["id"] for p in self.store.pending) and utc_naive() >= _ts(rec["deadline"]):
+                await self._expire(rec)
+            return
+        m1 = drop_forming(raw, 1)
         start = _ts(rec["last_1m"]) + pd.Timedelta(minutes=1) if rec.get("last_1m") else mss_close(_ts(rec["mss_open"]))
         bars = window_bars(m1, start, _ts(rec["deadline"]))
         if bars is not None and len(bars):
             await self._walk_limit_bars(rec, bars)
+            if not any(p["id"] == rec["id"] for p in self.store.pending):
+                return
+        if rec["paper"] and len(raw):
+            last_ts = raw.index[-1]
+            if not len(m1) or last_ts > m1.index[-1]:
+                row = raw.iloc[-1]
+                kind, _idx = first_entry_event(
+                    rec["side"], rec["entry"], rec["stop"], [row["low"]], [row["high"]],
+                )
+                if kind == "ran":
+                    await self._cancel_ran(rec)
+                    return
+                if kind == "fill":
+                    hit = position_hit(rec["side"], rec["stop"], rec["tp"], row["low"], row["high"])
+                    if hit:
+                        await self._paper_roundtrip(rec, hit, _iso(last_ts))
+                    else:
+                        await self._open_paper(rec, _iso(last_ts))
+                    return
         if any(p["id"] == rec["id"] for p in self.store.pending) and utc_naive() >= _ts(rec["deadline"]):
             await self._expire(rec)
+
+    async def _paper_limit_live(self, rec: dict) -> bool:
+        """Как cisdbot: тень сразу смотрит живую цену, не ждёт закрытия минутки."""
+        px = await self.ex.last_price(rec["symbol"])
+        if px is None:
+            return False
+        lo = float(rec["px_min"]) if rec.get("px_min") is not None else px
+        hi = float(rec["px_max"]) if rec.get("px_max") is not None else px
+        lo = min(lo, px)
+        hi = max(hi, px)
+        rec["px_min"] = lo
+        rec["px_max"] = hi
+        kind, _idx = first_entry_event(rec["side"], rec["entry"], rec["stop"], [lo], [hi])
+        if kind == "ran":
+            await self._cancel_ran(rec)
+            return True
+        if kind == "fill":
+            hit = position_hit(rec["side"], rec["stop"], rec["tp"], lo, hi)
+            if hit:
+                await self._paper_roundtrip(rec, hit, utc_naive().isoformat())
+            else:
+                await self._open_paper(rec, utc_naive().isoformat())
+            return True
+        self.store.save()
+        return False
 
     async def _walk_limit_bars(self, rec: dict, bars: pd.DataFrame) -> None:
         for ts, row in bars.iterrows():
@@ -388,18 +443,46 @@ class Engine:
                 logger.exception("позиция %s", pos.get("symbol"))
 
     async def _watch_paper_pos(self, pos: dict) -> None:
-        m1 = drop_forming(await self.ex.ohlcv(pos["symbol"], "1m", M1_BARS), 1)
-        start = _ts(pos["last_1m"]) + pd.Timedelta(minutes=1) if pos.get("last_1m") else _ts(pos["opened"])
-        bars = window_bars(m1, start, utc_naive() + pd.Timedelta(minutes=1))
-        if bars is None or len(bars) == 0:
-            return
-        for ts, row in bars.iterrows():
-            hit = position_hit(pos["side"], pos["stop"], pos["tp"], row["low"], row["high"])
-            pos["last_1m"] = _iso(ts)
+        # Как cisdbot: сначала живая цена и экстремумы с входа — реакция сразу.
+        px = await self.ex.last_price(pos["symbol"])
+        if px is not None:
+            lo = float(pos["px_min"]) if pos.get("px_min") is not None else px
+            hi = float(pos["px_max"]) if pos.get("px_max") is not None else px
+            lo = min(lo, px)
+            hi = max(hi, px)
+            pos["px_min"] = lo
+            pos["px_max"] = hi
+            hit = position_hit(pos["side"], pos["stop"], pos["tp"], lo, hi)
             if hit:
                 await self._close_paper(pos, hit, keep=True)
                 return
-        self.store.save()
+            self.store.save()
+
+        try:
+            raw = await self.ex.ohlcv(pos["symbol"], "1m", WATCH_M1)
+        except Exception:
+            logger.exception("минутки позиции %s", pos.get("symbol"))
+            return
+        m1 = drop_forming(raw, 1)
+        start = _ts(pos["last_1m"]) + pd.Timedelta(minutes=1) if pos.get("last_1m") else _ts(pos["opened"])
+        bars = window_bars(m1, start, utc_naive() + pd.Timedelta(minutes=1))
+        if bars is not None and len(bars):
+            for ts, row in bars.iterrows():
+                hit = position_hit(pos["side"], pos["stop"], pos["tp"], row["low"], row["high"])
+                pos["last_1m"] = _iso(ts)
+                if hit:
+                    await self._close_paper(pos, hit, keep=True)
+                    return
+            self.store.save()
+
+        # Текущая (ещё открытая) минутка — не ждём её закрытия.
+        if len(raw):
+            last_ts = raw.index[-1]
+            if not len(m1) or last_ts > m1.index[-1]:
+                row = raw.iloc[-1]
+                hit = position_hit(pos["side"], pos["stop"], pos["tp"], row["low"], row["high"])
+                if hit:
+                    await self._close_paper(pos, hit, keep=True)
 
     async def _close_paper(self, pos: dict, reason: str, keep: bool) -> None:
         exit_px, fee_out = exit_price(pos["side"], pos["stop"], pos["tp"], reason)

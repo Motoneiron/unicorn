@@ -54,6 +54,8 @@ ENTRY_MIN = 120
 RR = 2.0
 OHLCV_BARS = 600
 M1_BARS = 180
+# Для сопровождения тени достаточно нескольких минуток; 180 на каждый тик ломают лимит Bybit.
+WATCH_M1 = 8
 SCAN_S = 5
 
 _FEES = {"maker_fee": MAKER, "taker_fee": TAKER}
