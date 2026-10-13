@@ -81,6 +81,29 @@ def _num(rec: dict) -> str:
     return str(n) if n else "?"
 
 
+def sizing_line(rec: dict) -> str:
+    """Вес сайзинга, stop/ATR и итоговый % риска — если поля есть на заявке/позиции."""
+    risk = rec.get("risk_pct")
+    satr = rec.get("stop_atr")
+    if risk is None and satr is None:
+        return ""
+    bits = []
+    if risk is not None:
+        try:
+            rp = float(risk)
+            w = rp / float(RISK_PCT) if float(RISK_PCT) else 1.0
+            bits.append(f"×{w:g}")
+            bits.append(f"риск {rp:.2f}%")
+        except (TypeError, ValueError):
+            pass
+    if satr is not None:
+        try:
+            bits.append(f"stop/ATR {float(satr):.2f}")
+        except (TypeError, ValueError):
+            pass
+    return "Сайзинг: " + " | ".join(bits) if bits else ""
+
+
 def limit_card(rec: dict, balance: float | None = None) -> str:
     pair = rec["symbol"]
     side = int(rec["side"])
@@ -98,6 +121,9 @@ def limit_card(rec: dict, balance: float | None = None) -> str:
         f"R:R={_rr(entry, stop, tp):.2f}\n"
         f"Ожидание входа: 2ч  |  позиция: до стопа, тейка или {TIME_EXIT_H:g}ч"
     )
+    sizing = sizing_line(rec)
+    if sizing:
+        text += f"\n{sizing}"
     if balance is not None:
         text += f"\n{balance_line(balance)}"
     return text
@@ -108,6 +134,11 @@ def fill_card(pos: dict, balance: float | None = None) -> str:
     side = int(pos["side"])
     entry, stop, tp = float(pos["entry"]), float(pos["stop"]), float(pos["tp"])
     risk = abs(entry - stop) * float(pos["qty"])
+    risk_pct = pos.get("risk_pct")
+    try:
+        risk_pct_s = f"{float(risk_pct):.2f}" if risk_pct is not None else f"{float(RISK_PCT):.1f}"
+    except (TypeError, ValueError):
+        risk_pct_s = f"{float(RISK_PCT):.1f}"
     when = moscow_hm(str(pos.get("opened") or pos.get("last_1m") or ""))
     enter = f"вход ({when} МСК)" if when else "вход"
     text = (
@@ -117,8 +148,11 @@ def fill_card(pos: dict, balance: float | None = None) -> str:
         f"ТФ: {TF}\n"
         f"{_signal_line(pos)}\n"
         f"Вход: {price(pair, entry)} | Стоп: {price(pair, stop)} | Тейк: {price(pair, tp)}\n"
-        f"Риск: {risk:.2f} USDT ({float(RISK_PCT):.1f}%)"
+        f"Риск: {risk:.2f} USDT ({risk_pct_s}%)"
     )
+    sizing = sizing_line(pos)
+    if sizing:
+        text += f"\n{sizing}"
     if not pos.get("tpsl_ok", True):
         sl_pct = abs(stop - entry) / entry * 100 if entry else 0.0
         tp_pct = abs(tp - entry) / entry * 100 if entry else 0.0

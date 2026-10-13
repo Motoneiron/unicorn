@@ -437,6 +437,8 @@ class Engine:
             "signal_time": rec.get("signal_time") or rec.get("mss_open") or "",
             "htf_time": rec.get("htf_time") or "",
             "mss_open": rec.get("mss_open") or "",
+            "risk_pct": rec.get("risk_pct"),
+            "stop_atr": rec.get("stop_atr"),
         }
 
     async def _watch_positions(self) -> None:
