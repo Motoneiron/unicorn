@@ -8,8 +8,9 @@ CISDDetector в cisdbot, профиль tf1. Сверху две вещи:
 - FVG на свече слома и пересечение с диапазоном этой свечи.
 
 Лонг: нижний свип, медвежья серия, бычья свеча слева от неё.
-Слом — бычье закрытие выше хая Единорога. Лимитка на этот хай,
-стоп за лоу той же свечи. Шорт — зеркало.
+Слом — бычье закрытие выше хая всей пачки от свечи Единорога
+до бара свипа, оба края включительно. Лимитка остаётся на хай
+самой свечи Единорога, стоп за её лоу. Шорт — зеркало.
 """
 from __future__ import annotations
 
@@ -27,6 +28,14 @@ from detectors.cisd_htf import CISDDetector  # noqa: E402
 HTF_MIN = 240
 MAX_RANGE = 50
 CONFIRM_WINDOWS = 2
+
+
+def _series_extreme(df: pd.DataFrame, uni: int, trigger: int, long_side: bool) -> float:
+    """Хай лонга или лоу шорта от свечи Единорога до бара свипа, оба края включительно."""
+    window = df.iloc[int(uni):int(trigger) + 1]
+    if long_side:
+        return float(window["high"].max())
+    return float(window["low"].min())
 
 
 def _origin(df: pd.DataFrame, start_index, long_side: bool) -> int | None:
@@ -182,7 +191,7 @@ def find_setups(
             if not ok_swing:
                 stats["no_midswing"] += 1
                 continue
-        level = float(m15.iloc[uni]["high"] if long_side else m15.iloc[uni]["low"])
+        level = _series_extreme(m15, uni, trigger, long_side)
         mss = det.find_confirmation(
             m15,
             trigger,
@@ -295,3 +304,9 @@ def check_setup() -> None:
     inside = [s for s in kept if s["side"] == 1 and s["ob_i"] == 70]
     if len(inside) != 1:
         raise AssertionError(f"FVG этого примера внутри свечи свипа, {inside}")
+    # Бар после единорога выше его хая: закрытие 118 над 112 уже не слом.
+    higher = df.copy()
+    higher.iloc[71, higher.columns.get_loc("high")] = 119.0
+    bumped, _ = find_setups(higher)
+    if any(s["side"] == 1 and s["ob_i"] == 70 for s in bumped):
+        raise AssertionError(f"слом взял хай единорога, а не пачки, {bumped}")
