@@ -11,7 +11,9 @@ CISDDetector в cisdbot, профиль tf1. Сверху две вещи:
 Единорог — этот бар и все бычьи бары подряд влево, до первого
 медвежьего. Слом — бычье закрытие выше хая от левого бара
 Единорога до бара свипа, обе свечи в окне. Лимитка на хай
-всего блока, стоп за его лоу. Шорт — зеркало.
+всего блока, стоп за его лоу. Если бар блока сам поставил
+экстремум 4ч свечи и следующая 4ч его сняла — сетапа нет.
+Шорт — зеркало.
 """
 from __future__ import annotations
 
@@ -47,6 +49,32 @@ def _block_left(df: pd.DataFrame, origin: int, long_side: bool) -> int:
             break
         left -= 1
     return left
+
+
+def _block_holds_swept_extreme(
+    df: pd.DataFrame, left: int, right: int, sweep: dict, htf_min: int,
+) -> bool:
+    """Бар блока Единорога — это экстремум 4ч свечи, которую сняла следующая.
+
+    Для лонга смотрим лоу снятой свечи, для шорта её хай.
+    """
+    level = sweep.get("sweep_level")
+    anchor = sweep.get("htf_time")
+    if level is None or anchor is None:
+        return False
+    start = pd.Timestamp(anchor) - pd.Timedelta(minutes=int(htf_min))
+    end = pd.Timestamp(anchor)
+    long_side = sweep.get("type") == "bullish"
+    level = float(level)
+    eps = 1e-8
+    col = "low" if long_side else "high"
+    for i in range(int(left), int(right) + 1):
+        ts = pd.Timestamp(df.index[i])
+        if ts < start or ts >= end:
+            continue
+        if abs(float(df.iloc[i][col]) - level) <= eps:
+            return True
+    return False
 
 
 def _series_extreme(df: pd.DataFrame, left: int, trigger: int, long_side: bool) -> float:
@@ -163,6 +191,7 @@ def find_setups(
         "no_fvg": 0,
         "fvg_out": 0,
         "skip_out": 0,
+        "uni_extreme": 0,
         "kept": 0,
     }
     setups: list[dict] = []
@@ -197,6 +226,9 @@ def find_setups(
             stats["no_origin"] += 1
             continue
         left = _block_left(m15, uni, long_side)
+        if _block_holds_swept_extreme(m15, left, uni, sweep, htf_min):
+            stats["uni_extreme"] += 1
+            continue
         if unicorn_mid_swing:
             # ПОПРАВКА 14.10.2026: единорог — средняя (вторая) свеча трехсвечного свинга.
             if uni < 1:
@@ -355,3 +387,17 @@ def check_setup() -> None:
         raise AssertionError(f"блок единорога {pack}")
     if abs(pack[0]["entry"] - 116.0) > 1e-9 or abs(pack[0]["stop"] - 101.0) > 1e-9:
         raise AssertionError(f"край блока {pack[0]}")
+    # Лоу снятой 4ч стоит на баре блока: сетап с этим блоком не живёт.
+    owned = df.copy()
+    for i in range(62, 71):
+        owned.iloc[i, owned.columns.get_loc("open")] = 104.0
+        owned.iloc[i, owned.columns.get_loc("close")] = 108.0
+        owned.iloc[i, owned.columns.get_loc("high")] = 110.0
+        owned.iloc[i, owned.columns.get_loc("low")] = 103.0
+    owned.iloc[62, owned.columns.get_loc("low")] = 99.0
+    owned.iloc[55, owned.columns.get_loc("low")] = 100.0
+    banned, ban_stats = find_setups(owned)
+    if any(s["side"] == 1 and s["ob_left"] <= 62 <= s["ob_i"] for s in banned):
+        raise AssertionError(f"единорог сам свипнут {banned}")
+    if ban_stats["uni_extreme"] < 1:
+        raise AssertionError(f"фильтр экстремума не сработал {ban_stats}")
