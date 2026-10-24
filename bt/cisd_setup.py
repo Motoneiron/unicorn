@@ -6,6 +6,7 @@ CISDDetector в cisdbot, профиль tf1. Сверху две вещи:
 
 - свеча, от которой серия пошла в свип (она и есть Единорог);
 - FVG на свече слома и пересечение с диапазоном этой свечи.
+  Первый бар этой тройки — бар свипа или более поздний.
 
 Лонг: нижний свип, медвежья серия, бычий бар слева от неё.
 Единорог — этот бар и все бычьи бары подряд влево, до первого
@@ -189,6 +190,7 @@ def find_setups(
         "dirty_body": 0,
         "extremum": 0,
         "no_fvg": 0,
+        "fvg_early": 0,
         "fvg_out": 0,
         "skip_out": 0,
         "uni_extreme": 0,
@@ -276,6 +278,9 @@ def find_setups(
             continue
         if fvg_in_sweep and not _fvg_inside_sweep(m15, htf_time, int(mss), htf_min):
             stats["fvg_out"] += 1
+            continue
+        if int(mss) - 2 < trigger:
+            stats["fvg_early"] += 1
             continue
         zone = _fvg_overlap(m15, int(mss), left, uni, long_side)
         if zone is None:
@@ -401,3 +406,22 @@ def check_setup() -> None:
         raise AssertionError(f"единорог сам свипнут {banned}")
     if ban_stats["uni_extreme"] < 1:
         raise AssertionError(f"фильтр экстремума не сработал {ban_stats}")
+    # Слом на следующей свече после свипа: первый бар FVG ещё до свипа.
+    early = df.copy()
+    bars = {
+        70: (94.0, 98.0, 91.0, 97.0),
+        71: (97.0, 98.0, 94.0, 95.0),
+        72: (95.0, 96.0, 92.0, 93.0),
+        73: (93.0, 94.0, 90.0, 91.0),
+        75: (94.0, 100.0, 95.0, 99.0),
+    }
+    for i, (op, hi, lo, cl) in bars.items():
+        early.iloc[i, early.columns.get_loc("open")] = op
+        early.iloc[i, early.columns.get_loc("high")] = hi
+        early.iloc[i, early.columns.get_loc("low")] = lo
+        early.iloc[i, early.columns.get_loc("close")] = cl
+    early_kept, early_stats = find_setups(early)
+    if any(s["side"] == 1 and s["ob_i"] == 70 for s in early_kept):
+        raise AssertionError(f"FVG начался до свипа {early_kept}")
+    if early_stats["fvg_early"] < 1:
+        raise AssertionError(f"ранний FVG не отсеян {early_stats}")
