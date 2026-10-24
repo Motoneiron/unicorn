@@ -14,8 +14,9 @@ CISDDetector в cisdbot, профиль tf1. Сверху две вещи:
 Единорога до бара свипа, обе свечи в окне. Лимитка на хай
 всего блока, стоп за его лоу. Если бар блока сам поставил
 экстремум 4ч свечи и следующая 4ч его сняла — сетапа нет.
-Фитиль за экстремум блока до подтверждающего FVG сетап гасит,
-дальше слом не ищем. Шорт — зеркало.
+Если фитиль обновил экстремум блока, а FVG ещё не закрылся — сетап гаснет.
+Если FVG уже был, ждём закрытие за экстремум пачки от Единорога до свипа.
+Шорт — зеркало.
 """
 from __future__ import annotations
 
@@ -87,14 +88,19 @@ def _first_break(
     level: float,
     long_side: bool,
     end: int,
-) -> tuple[str, int]:
-    """Первый фитиль за экстремум блока Единорога.
+    htf_time,
+    htf_min: int,
+    fvg_in_sweep: bool,
+) -> tuple[str, int, int]:
+    """Сначала FVG после свипа, потом закрытие за экстремум пачки.
 
-    Этот бар должен быть сломом с местом под FVG не раньше свипа.
-    Иначе сетап погашен, более поздний слом не смотрим.
+    Фитиль за экстремум блока до уже закрытого FVG гасит сетап.
+    Сам бар FVG этот экстремум обновлять не может: разрыв должен быть раньше.
     """
     block = df.iloc[int(left):int(uni) + 1]
     ext = float(block["high"].max() if long_side else block["low"].min())
+    seen = False
+    fvg_i = -1
     for i in range(int(uni) + 1, int(end)):
         row = df.iloc[i]
         o = float(row["open"])
@@ -107,12 +113,19 @@ def _first_break(
         else:
             updated = lo < ext
             broke = c < o and c < level
-        if not updated:
-            continue
-        if broke and i - 2 >= int(trigger):
-            return "mss", i
-        return "ran", i
-    return "none", -1
+        if updated and not seen:
+            return "ran", i, -1
+        if (
+            not seen
+            and i - 2 >= int(trigger)
+            and (not fvg_in_sweep or _fvg_inside_sweep(df, htf_time, i, htf_min))
+            and _fvg_overlap(df, i, left, uni, long_side) is not None
+        ):
+            seen = True
+            fvg_i = i
+        if seen and broke:
+            return "mss", i, fvg_i
+    return "none", -1, -1
 
 
 def _series_extreme(df: pd.DataFrame, left: int, trigger: int, long_side: bool) -> float:
@@ -292,7 +305,10 @@ def find_setups(
                 m15, trigger, htf_anchor=htf_time,
             ),
         )
-        kind, mss = _first_break(m15, left, uni, trigger, level, long_side, end)
+        kind, mss, fvg_i = _first_break(
+            m15, left, uni, trigger, level, long_side, end,
+            htf_time, htf_min, fvg_in_sweep,
+        )
         if kind == "ran":
             stats["uni_run"] += 1
             continue
@@ -318,13 +334,7 @@ def find_setups(
         if det.is_extremum_updated(m15, trigger, int(mss), not long_side):
             stats["extremum"] += 1
             continue
-        if fvg_in_sweep and not _fvg_inside_sweep(m15, htf_time, int(mss), htf_min):
-            stats["fvg_out"] += 1
-            continue
-        if int(mss) - 2 < trigger:
-            stats["fvg_early"] += 1
-            continue
-        zone = _fvg_overlap(m15, int(mss), left, uni, long_side)
+        zone = _fvg_overlap(m15, int(fvg_i), left, uni, long_side)
         if zone is None:
             stats["no_fvg"] += 1
             continue
@@ -383,14 +393,15 @@ def check_setup() -> None:
     l[55] = 100.0
     c[63] = 105.0
     o[63] = 108.0
-    # 16:00+: бычья свеча 70, медвежья серия, снятие на 74, слом с FVG на 77.
+    # 16:00+: бычья свеча 70, медвежья серия, снятие на 74.
+    # FVG на 76, пока хай блока 112 не пробит. Закрытие за пачку на 77.
     o[70], h[70], l[70], c[70] = 102.0, 112.0, 101.0, 108.0
     o[71], h[71], l[71], c[71] = 108.0, 109.0, 104.0, 105.0
     o[72], h[72], l[72], c[72] = 105.0, 106.0, 100.0, 101.0
     o[73], h[73], l[73], c[73] = 101.0, 102.0, 96.0, 97.0
     o[74], h[74], l[74], c[74] = 97.0, 98.0, 90.0, 94.0
     o[75], h[75], l[75], c[75] = 94.0, 100.0, 93.0, 99.0
-    o[76], h[76], l[76], c[76] = 99.0, 110.0, 98.0, 109.0
+    o[76], h[76], l[76], c[76] = 106.0, 110.0, 105.0, 109.0
     o[77], h[77], l[77], c[77] = 109.0, 120.0, 111.0, 118.0
     c[79] = 115.0
     o[79] = 114.0
