@@ -188,14 +188,10 @@ class Engine:
         entry, stop, tp = levels
         m1 = drop_forming(await self.ex.ohlcv(pair, "1m", M1_BARS), 1)
         bars = window_bars(m1, mss_close(mss_open), entry_deadline(mss_open))
-        kind, _idx = first_entry_event(side, entry, stop, bars["low"], bars["high"], tp)
+        kind, _idx = first_entry_event(side, entry, stop, bars["low"], bars["high"])
         if kind == "fill":
             self.store.mark_seen(sid, utc_naive().isoformat())
             logger.info("%s цена уже забирала лимитку, пока бот не смотрел. Не догоняю", pair)
-            return
-        if kind == "ran":
-            self.store.mark_seen(sid, utc_naive().isoformat())
-            logger.info("%s цена уже была на 2R до входа, лимитку не ставлю", pair)
             return
         stop_atr = abs(entry - stop) / atr_value if atr_value else None
         w = sizing_weight(stop_atr) if SIZING_ON else 1.0
@@ -278,49 +274,42 @@ class Engine:
             if fill is not None:
                 await self._open_live(rec, fill[0], fill[1])
                 return
+        else:
+            if await self._paper_limit_live(rec):
+                return
         try:
             raw = await self.ex.ohlcv(rec["symbol"], "1m", WATCH_M1)
         except Exception:
             logger.exception("минутки лимитки %s", rec.get("symbol"))
-            raw = None
-        if raw is not None:
-            m1 = drop_forming(raw, 1)
-            start = _ts(rec["last_1m"]) + pd.Timedelta(minutes=1) if rec.get("last_1m") else mss_close(_ts(rec["mss_open"]))
-            bars = window_bars(m1, start, _ts(rec["deadline"]))
-            if bars is not None and len(bars):
-                await self._walk_limit_bars(rec, bars)
-                if not any(p["id"] == rec["id"] for p in self.store.pending):
-                    return
-            if await self._watch_limit_live(rec):
-                return
-            if rec["paper"] and len(raw):
-                last_ts = raw.index[-1]
-                if not len(m1) or last_ts > m1.index[-1]:
-                    row = raw.iloc[-1]
-                    kind, _idx = first_entry_event(
-                        rec["side"], rec["entry"], rec["stop"], [row["low"]], [row["high"]], rec["tp"],
-                    )
-                    if kind == "ran":
-                        await self._drop_limit(rec, "цена дошла до 2R до входа")
-                        return
-                    if kind == "fill":
-                        hit = position_hit(rec["side"], rec["stop"], rec["tp"], row["low"], row["high"])
-                        if hit:
-                            await self._paper_roundtrip(rec, hit, _iso(last_ts))
-                        else:
-                            await self._open_paper(rec, _iso(last_ts))
-                        return
-        elif await self._watch_limit_live(rec):
+            if any(p["id"] == rec["id"] for p in self.store.pending) and utc_naive() >= _ts(rec["deadline"]):
+                await self._expire(rec)
             return
+        m1 = drop_forming(raw, 1)
+        start = _ts(rec["last_1m"]) + pd.Timedelta(minutes=1) if rec.get("last_1m") else mss_close(_ts(rec["mss_open"]))
+        bars = window_bars(m1, start, _ts(rec["deadline"]))
+        if bars is not None and len(bars):
+            await self._walk_limit_bars(rec, bars)
+            if not any(p["id"] == rec["id"] for p in self.store.pending):
+                return
+        if rec["paper"] and len(raw):
+            last_ts = raw.index[-1]
+            if not len(m1) or last_ts > m1.index[-1]:
+                row = raw.iloc[-1]
+                kind, _idx = first_entry_event(
+                    rec["side"], rec["entry"], rec["stop"], [row["low"]], [row["high"]],
+                )
+                if kind == "fill":
+                    hit = position_hit(rec["side"], rec["stop"], rec["tp"], row["low"], row["high"])
+                    if hit:
+                        await self._paper_roundtrip(rec, hit, _iso(last_ts))
+                    else:
+                        await self._open_paper(rec, _iso(last_ts))
+                    return
         if any(p["id"] == rec["id"] for p in self.store.pending) and utc_naive() >= _ts(rec["deadline"]):
             await self._expire(rec)
 
-    async def _watch_limit_live(self, rec: dict) -> bool:
-        """Живая цена: 2R без касания входа снимает заявку, касание входа — филл.
-
-        Закрытые минутки разбираются раньше, поэтому 2R на прошлой минуте
-        не смешивается с более поздним касанием лимитки.
-        """
+    async def _paper_limit_live(self, rec: dict) -> bool:
+        """Как cisdbot: тень сразу смотрит живую цену, не ждёт закрытия минутки."""
         px = await self.ex.last_price(rec["symbol"])
         if px is None:
             return False
@@ -330,13 +319,8 @@ class Engine:
         hi = max(hi, px)
         rec["px_min"] = lo
         rec["px_max"] = hi
-        kind, _idx = first_entry_event(
-            rec["side"], rec["entry"], rec["stop"], [lo], [hi], rec["tp"],
-        )
-        if kind == "ran":
-            await self._drop_limit(rec, "цена дошла до 2R до входа")
-            return True
-        if kind == "fill" and rec["paper"]:
+        kind, _idx = first_entry_event(rec["side"], rec["entry"], rec["stop"], [lo], [hi])
+        if kind == "fill":
             hit = position_hit(rec["side"], rec["stop"], rec["tp"], lo, hi)
             if hit:
                 await self._paper_roundtrip(rec, hit, utc_naive().isoformat())
@@ -354,12 +338,9 @@ class Engine:
                     await self._open_live(rec, fill[0], fill[1])
                     return
             kind, _idx = first_entry_event(
-                rec["side"], rec["entry"], rec["stop"], [row["low"]], [row["high"]], rec["tp"],
+                rec["side"], rec["entry"], rec["stop"], [row["low"]], [row["high"]],
             )
             rec["last_1m"] = _iso(ts)
-            if kind == "ran":
-                await self._drop_limit(rec, "цена дошла до 2R до входа")
-                return
             if kind == "fill" and rec["paper"]:
                 hit = position_hit(rec["side"], rec["stop"], rec["tp"], row["low"], row["high"])
                 if hit:
@@ -395,29 +376,22 @@ class Engine:
         return filled, avg
 
     async def _expire(self, rec: dict) -> None:
-        await self._drop_limit(rec, "2 часа вышли")
-
-    async def _drop_limit(self, rec: dict, why: str) -> None:
-        """Снять висящую лимитку. Если биржа уже исполнила — это филл, не отмена."""
-        if not any(p["id"] == rec["id"] for p in self.store.pending):
-            return
-        if not rec["paper"]:
+        if not rec["paper"] and rec.get("order_id"):
             fill = await self._live_fill(rec)
             if fill is not None:
                 await self._open_live(rec, fill[0], fill[1])
                 return
-            if rec.get("order_id"):
-                try:
-                    await self.ex.cancel(rec["symbol"], rec["order_id"])
-                except Exception:
-                    fill = await self._live_fill(rec)
-                    if fill is not None:
-                        await self._open_live(rec, fill[0], fill[1])
-                        return
-                    logger.exception("не снял лимитку %s", rec["symbol"])
+            try:
+                await self.ex.cancel(rec["symbol"], rec["order_id"])
+            except Exception:
+                fill = await self._live_fill(rec)
+                if fill is not None:
+                    await self._open_live(rec, fill[0], fill[1])
                     return
+                logger.exception("не снял просроченную лимитку %s", rec["symbol"])
+                return
         self.store.drop_pending(rec["id"])
-        await self.notify(cancel_card(rec, why))
+        await self.notify(cancel_card(rec, "2 часа вышли"))
 
     async def _open_paper(self, rec: dict, bar_iso: str) -> None:
         pos = self._position_from(rec, rec["qty"], rec["entry"], paper=True)

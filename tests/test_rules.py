@@ -23,7 +23,7 @@ from bot.rules import (
     time_exit_due,
     trigger_stop,
 )
-from bt.execute import TAKER, _fill_limit, _walk
+from bt.execute import TAKER, _fill, _walk
 
 
 def test_parity():
@@ -34,10 +34,11 @@ def test_parity():
             lows = entry + rng.normal(0, span, 40)
             highs = lows + rng.random(40) * span
             got = first_entry_event(side, entry, stop, lows, highs)
-            kind, idx = _fill_limit(
-                side, entry, stop, np.asarray(lows, float), np.asarray(highs, float), 0, len(lows),
-            )
-            assert got == (kind, idx), (got, kind, idx)
+            exp_i = _fill(side, entry, np.asarray(lows, float), np.asarray(highs, float), 0, len(lows))
+            if exp_i < 0:
+                assert got == ("miss", -1), (got, exp_i)
+            else:
+                assert got == ("fill", exp_i), (got, exp_i)
 
 
 def test_same_bar_fill_beats_2r():
@@ -45,11 +46,9 @@ def test_same_bar_fill_beats_2r():
     assert (kind, idx) == ("fill", 0)
 
 
-def test_2r_before_fill_cancels():
+def test_2r_before_fill_does_not_cancel():
     kind, idx = first_entry_event(1, 100.0, 99.0, [100.5, 100.0], [102.0, 100.2])
-    assert (kind, idx) == ("ran", 0)
-    kind, idx = first_entry_event(-1, 100.0, 101.0, [98.0, 99.8], [99.5, 100.0])
-    assert (kind, idx) == ("ran", 0)
+    assert (kind, idx) == ("fill", 1)
 
 
 def test_stop_before_tp():
@@ -151,7 +150,7 @@ def test_time_exit_price_is_taker_with_slip():
 def main():
     test_parity()
     test_same_bar_fill_beats_2r()
-    test_2r_before_fill_cancels()
+    test_2r_before_fill_does_not_cancel()
     test_stop_before_tp()
     test_deadline_is_two_hours_after_close()
     test_drop_forming()

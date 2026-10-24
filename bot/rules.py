@@ -80,24 +80,18 @@ def first_entry_event(
     stop: float,
     lows,
     highs,
-    tp: float | None = None,
 ) -> tuple[str, int]:
-    """Лимитка как bt.execute._fill_limit.
+    """Как bt.execute._fill: первое касание входа в окне.
 
-    Если 2R случился на более ранней минутке, чем филл, возвращаем "ran":
-    заявку надо снять, движение уже прошло. На одной минутке филл важнее:
-    фитиль мог сначала задеть лимитку, потом уйти к тейку.
+    Фильтр 2R отключён по бэктесту — при широком стопе эффекта не даёт
+    (см. results/STOP_VARIANTS.md). Аргумент stop оставлен для совместимости вызовов.
     """
-    target = float(tp) if tp is not None else tp2_price(side, entry, stop)
+    del stop
     for i, (lo, hi) in enumerate(zip(lows, highs)):
         if int(side) == 1:
             filled = float(lo) <= entry
-            saw_2r = float(hi) >= target
         else:
             filled = float(hi) >= entry
-            saw_2r = float(lo) <= target
-        if saw_2r and not filled:
-            return "ran", i
         if filled:
             return "fill", i
     return "miss", -1

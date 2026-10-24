@@ -72,13 +72,38 @@ def _fvg_overlap(
     return bot, top
 
 
+def _fvg_inside_sweep(m15: pd.DataFrame, htf_time, mss_i: int, htf_min: int) -> bool:
+    """Три бара подтверждающего FVG открылись внутри свечи свипа."""
+    if mss_i < 2:
+        return False
+    start = pd.Timestamp(htf_time)
+    end = start + pd.Timedelta(minutes=int(htf_min))
+    first = pd.Timestamp(m15.index[mss_i - 2])
+    last = pd.Timestamp(m15.index[mss_i])
+    return start <= first and last < end
+
+
 def find_setups(
     m15: pd.DataFrame,
     htf_min: int = HTF_MIN,
     max_range: int = MAX_RANGE,
     confirm_windows: int = CONFIRM_WINDOWS,
+    unicorn_mid_swing: bool = False,
+    unicorn_clean_body: bool = False,
+    fvg_in_sweep: bool = False,
 ) -> tuple[list[dict], dict]:
-    """Сначала свипы старшего ТФ, потом Единорог на серии после каждого свипа."""
+    """Сначала свипы старшего ТФ, потом Единорог на серии после каждого свипа.
+
+    ПОПРАВКИ 14.10.2026 (флаги, дефолт False — канон не меняется):
+    unicorn_mid_swing — единорог обязан быть средней (второй) свечой трехсвечного
+    свинга (лонг: хай выше максимумов обоих соседей — первой и третьей свечи;
+    шорт зеркально: лоу ниже минимумов обоих соседей).
+    unicorn_clean_body — после свипа и до бара слома (исключая оба) ни одна свеча
+    не должна перекрывать ТЕЛОМ тело единорога.
+    fvg_in_sweep — подтверждающий FVG целиком внутри 4ч-свечи свипа,
+    той же, где лежит триггер. По умолчанию выключено: бот и старые книги
+    не меняются, пока прогон явно не попросит.
+    """
     det = CISDDetector(
         htf_ratio=htf_min,
         max_range=max_range,
@@ -102,9 +127,12 @@ def find_setups(
         "up": 0,
         "no_series": 0,
         "no_origin": 0,
+        "no_midswing": 0,
         "no_mss": 0,
+        "dirty_body": 0,
         "extremum": 0,
         "no_fvg": 0,
+        "fvg_out": 0,
         "skip_out": 0,
         "kept": 0,
     }
@@ -139,6 +167,21 @@ def find_setups(
         if uni is None or uni >= trigger:
             stats["no_origin"] += 1
             continue
+        if unicorn_mid_swing:
+            # ПОПРАВКА 14.10.2026: единорог — средняя (вторая) свеча трехсвечного свинга.
+            if uni < 1:
+                stats["no_midswing"] += 1
+                continue
+            cp, lf, rt = m15.iloc[uni], m15.iloc[uni - 1], m15.iloc[uni + 1]
+            if long_side:
+                ok_swing = (float(cp["high"]) > float(lf["high"])
+                            and float(cp["high"]) > float(rt["high"]))
+            else:
+                ok_swing = (float(cp["low"]) < float(lf["low"])
+                            and float(cp["low"]) < float(rt["low"]))
+            if not ok_swing:
+                stats["no_midswing"] += 1
+                continue
         level = float(m15.iloc[uni]["high"] if long_side else m15.iloc[uni]["low"])
         mss = det.find_confirmation(
             m15,
@@ -150,8 +193,26 @@ def find_setups(
         if mss is None:
             stats["no_mss"] += 1
             continue
+        if unicorn_clean_body:
+            # ПОПРАВКА 14.10.2026: после свипа и до бара слома (оба края исключая)
+            # ни одна свеча не перекрывает ТЕЛОМ тело единорога.
+            u_lo_b = min(float(m15.iloc[uni]["open"]), float(m15.iloc[uni]["close"]))
+            u_hi_b = max(float(m15.iloc[uni]["open"]), float(m15.iloc[uni]["close"]))
+            dirty = False
+            for k in range(trigger + 1, int(mss)):
+                kb_lo = min(float(m15.iloc[k]["open"]), float(m15.iloc[k]["close"]))
+                kb_hi = max(float(m15.iloc[k]["open"]), float(m15.iloc[k]["close"]))
+                if kb_hi > u_lo_b and kb_lo < u_hi_b:
+                    dirty = True
+                    break
+            if dirty:
+                stats["dirty_body"] += 1
+                continue
         if det.is_extremum_updated(m15, trigger, int(mss), not long_side):
             stats["extremum"] += 1
+            continue
+        if fvg_in_sweep and not _fvg_inside_sweep(m15, htf_time, int(mss), htf_min):
+            stats["fvg_out"] += 1
             continue
         zone = _fvg_overlap(m15, int(mss), uni, long_side)
         if zone is None:
@@ -230,3 +291,7 @@ def check_setup() -> None:
         raise AssertionError(f"слом/лимитка {s}")
     if not (s["zone_bot"] < s["zone_top"]):
         raise AssertionError(f"зона {s['zone_bot']} {s['zone_top']}")
+    kept, _ = find_setups(df, fvg_in_sweep=True)
+    inside = [s for s in kept if s["side"] == 1 and s["ob_i"] == 70]
+    if len(inside) != 1:
+        raise AssertionError(f"FVG этого примера внутри свечи свипа, {inside}")
