@@ -90,7 +90,7 @@ def find_setups(
     confirm_windows: int = CONFIRM_WINDOWS,
     unicorn_mid_swing: bool = False,
     unicorn_clean_body: bool = False,
-    fvg_in_sweep: bool = False,
+    fvg_in_sweep: bool = True,
 ) -> tuple[list[dict], dict]:
     """Сначала свипы старшего ТФ, потом Единорог на серии после каждого свипа.
 
@@ -101,8 +101,8 @@ def find_setups(
     unicorn_clean_body — после свипа и до бара слома (исключая оба) ни одна свеча
     не должна перекрывать ТЕЛОМ тело единорога.
     fvg_in_sweep — подтверждающий FVG целиком внутри 4ч-свечи свипа,
-    той же, где лежит триггер. По умолчанию выключено: бот и старые книги
-    не меняются, пока прогон явно не попросит.
+    той же, где лежит триггер. В бэктесте включено. Бот передаёт False,
+    пока прогон не покажет, что правило стоит переносить.
     """
     det = CISDDetector(
         htf_ratio=htf_min,

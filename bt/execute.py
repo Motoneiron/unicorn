@@ -9,6 +9,7 @@
 с тем же проскальзыванием на стопе.
 
 Одна заявка или позиция за раз. Жизнь зоны — 24 бара M15 после свечи слома.
+Лимитка снимается, если 2R случился раньше филла. На одной минутке филл важнее.
 """
 from __future__ import annotations
 
@@ -49,7 +50,7 @@ def run_book(
     need_h4: bool,
     entry_kind: str = "limit",
     step_min: int = 5,
-    skip_ran_2r: bool = False,
+    skip_ran_2r: bool = True,
 ) -> tuple[list[dict], dict]:
     ts = path.index.to_numpy()
     hi = path["high"].to_numpy(float)

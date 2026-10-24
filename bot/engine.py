@@ -136,7 +136,7 @@ class Engine:
         if df is None or len(df) < 50:
             return
         self._last_ltf[pair] = _iso(df.index[-1])
-        setups, stats = await asyncio.to_thread(find_setups, df)
+        setups, stats = await asyncio.to_thread(find_setups, df, fvg_in_sweep=False)
         atr = atr14(df["high"], df["low"], df["close"])
         logger.info("%s закрытый 15м %s, сетапов в окне %s", pair, self._last_ltf[pair], stats.get("kept"))
         now = utc_naive()

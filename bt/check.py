@@ -134,3 +134,18 @@ def check() -> None:
     expect_stop = gross_tp - TAKER / 0.01 - MAKER / 0.01
     if abs(got[0]["r"] - expect_stop) > 1e-9:
         raise AssertionError(f"R стоп-входа {got[0]['r']} != {expect_stop}")
+
+    # 2R раньше лимитки: первая свеча пути бьёт 102 и не касается 100.
+    ran_idx = pd.date_range(t0 + pd.Timedelta(minutes=15), periods=2, freq="5min")
+    ran_path = pd.DataFrame(
+        {
+            "open": [100.5, 100.2],
+            "high": [102.0, 100.4],
+            "low": [100.4, 99.8],
+            "close": [101.5, 100.0],
+        },
+        index=ran_idx,
+    )
+    ran_trades, ran_st = run_book([setup], m15, ran_path, rr=2.0, need_h4=False)
+    if ran_trades or ran_st["ran_2r"] != 1:
+        raise AssertionError(f"отмена по 2R {ran_trades} {ran_st}")

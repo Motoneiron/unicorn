@@ -142,7 +142,7 @@ def causal_match(
     seen: set[str] = set()
     for j in range(i0, i1):
         window = m15.iloc[j - BOT_WINDOW + 1:j + 1]
-        setups, _stats = find_setups(window)
+        setups, _stats = find_setups(window, fvg_in_sweep=False)
         for setup in setups:
             rec = setup_record(pair, window, setup)
             if rec is None or rec["sid"] in seen:
@@ -165,7 +165,7 @@ def causal_match(
 
 
 def final_records(pair: str, m15: pd.DataFrame) -> list[dict]:
-    setups, _stats = find_setups(m15)
+    setups, _stats = find_setups(m15, fvg_in_sweep=False)
     records = []
     for setup in setups:
         rec = setup_record(pair, m15, setup)

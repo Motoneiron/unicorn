@@ -11,6 +11,8 @@
 Скан использует только закрытые M15-бары. Исполнение: лимитка 120 минут,
 выход через 6 часов, maker/taker-комиссии и проскальзывание как в боте,
 стоп раньше тейка на одной минутке, одна заявка/позиция на пару.
+Сетап берётся с FVG внутри свечи свипа. Лимитка снимается, если 2R
+случился раньше филла; на одной минутке филл важнее.
 """
 from __future__ import annotations
 
@@ -64,6 +66,7 @@ class Portfolio:
         "expired": 0,
         "fills": 0,
         "blocked": 0,
+        "ran_2r": 0,
     })
 
 
@@ -144,7 +147,14 @@ def _walk_minute(
             portfolio.pending = None
             return
         side = pending["side"]
-        filled = low_i <= pending["entry"] if side == 1 else high_i >= pending["entry"]
+        entry = pending["entry"]
+        tp2 = entry + side * 2.0 * abs(entry - pending["stop"])
+        filled = low_i <= entry if side == 1 else high_i >= entry
+        saw_2r = high_i >= tp2 if side == 1 else low_i <= tp2
+        if saw_2r and not filled:
+            portfolio.counters["ran_2r"] += 1
+            portfolio.pending = None
+            return
         if not filled:
             return
         hit = position_hit(side, pending["stop"], pending["tp"], low_i, high_i)
@@ -252,10 +262,25 @@ def _consider_setups(
         deadline = entry_deadline(mss_open)
         a0 = _search(ts, np.datetime64(mss_close(mss_open)))
         a1 = _search(ts, min(np.datetime64(deadline), now64))
-        if side == 1:
-            touched = bool(np.any(lo[a0:a1] <= entry_r))
-        else:
-            touched = bool(np.any(hi[a0:a1] >= entry_r))
+        tp2 = entry_r + side * 2.0 * abs(entry_r - stop_r)
+        ran = touched = False
+        for i in range(a0, a1):
+            if side == 1:
+                got_fill = lo[i] <= entry_r
+                saw_2r = hi[i] >= tp2
+            else:
+                got_fill = hi[i] >= entry_r
+                saw_2r = lo[i] <= tp2
+            if saw_2r and not got_fill:
+                ran = True
+                break
+            if got_fill:
+                touched = True
+                break
+        if ran:
+            portfolio.counters["ran_2r"] += 1
+            portfolio.seen.add(sid)
+            continue
         if touched:
             portfolio.counters["dogon"] += 1
             portfolio.seen.add(sid)
