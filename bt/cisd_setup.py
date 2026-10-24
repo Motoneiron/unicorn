@@ -14,7 +14,8 @@ CISDDetector в cisdbot, профиль tf1. Сверху две вещи:
 Единорога до бара свипа, обе свечи в окне. Лимитка на хай
 всего блока, стоп за его лоу. Если бар блока сам поставил
 экстремум 4ч свечи и следующая 4ч его сняла — сетапа нет.
-Шорт — зеркало.
+Фитиль за экстремум блока до подтверждающего FVG сетап гасит,
+дальше слом не ищем. Шорт — зеркало.
 """
 from __future__ import annotations
 
@@ -76,6 +77,42 @@ def _block_holds_swept_extreme(
         if abs(float(df.iloc[i][col]) - level) <= eps:
             return True
     return False
+
+
+def _first_break(
+    df: pd.DataFrame,
+    left: int,
+    uni: int,
+    trigger: int,
+    level: float,
+    long_side: bool,
+    end: int,
+) -> tuple[str, int]:
+    """Первый фитиль за экстремум блока Единорога.
+
+    Этот бар должен быть сломом с местом под FVG не раньше свипа.
+    Иначе сетап погашен, более поздний слом не смотрим.
+    """
+    block = df.iloc[int(left):int(uni) + 1]
+    ext = float(block["high"].max() if long_side else block["low"].min())
+    for i in range(int(uni) + 1, int(end)):
+        row = df.iloc[i]
+        o = float(row["open"])
+        h = float(row["high"])
+        lo = float(row["low"])
+        c = float(row["close"])
+        if long_side:
+            updated = h > ext
+            broke = c > o and c > level
+        else:
+            updated = lo < ext
+            broke = c < o and c < level
+        if not updated:
+            continue
+        if broke and i - 2 >= int(trigger):
+            return "mss", i
+        return "ran", i
+    return "none", -1
 
 
 def _series_extreme(df: pd.DataFrame, left: int, trigger: int, long_side: bool) -> float:
@@ -187,6 +224,7 @@ def find_setups(
         "no_origin": 0,
         "no_midswing": 0,
         "no_mss": 0,
+        "uni_run": 0,
         "dirty_body": 0,
         "extremum": 0,
         "no_fvg": 0,
@@ -247,14 +285,18 @@ def find_setups(
                 stats["no_midswing"] += 1
                 continue
         level = _series_extreme(m15, left, trigger, long_side)
-        mss = det.find_confirmation(
-            m15,
-            trigger,
-            level,
-            is_bearish=not long_side,
-            htf_anchor=htf_time,
+        end = min(
+            trigger + det.max_range + 1,
+            len(m15),
+            det._confirm_end_iloc_exclusive_by_htf(
+                m15, trigger, htf_anchor=htf_time,
+            ),
         )
-        if mss is None:
+        kind, mss = _first_break(m15, left, uni, trigger, level, long_side, end)
+        if kind == "ran":
+            stats["uni_run"] += 1
+            continue
+        if kind != "mss":
             stats["no_mss"] += 1
             continue
         if unicorn_clean_body:
@@ -423,5 +465,13 @@ def check_setup() -> None:
     early_kept, early_stats = find_setups(early)
     if any(s["side"] == 1 and s["ob_i"] == 70 for s in early_kept):
         raise AssertionError(f"FVG начался до свипа {early_kept}")
-    if early_stats["fvg_early"] < 1:
+    if early_stats["uni_run"] < 1 and early_stats["fvg_early"] < 1:
         raise AssertionError(f"ранний FVG не отсеян {early_stats}")
+    # Фитиль выше блока на баре до слома: поздний слом уже не ищем.
+    poked = df.copy()
+    poked.iloc[76, poked.columns.get_loc("high")] = 113.0
+    poke_kept, poke_stats = find_setups(poked)
+    if any(s["side"] == 1 and s["ob_i"] == 70 for s in poke_kept):
+        raise AssertionError(f"фитиль за блок не погасил сетап {poke_kept}")
+    if poke_stats["uni_run"] < 1:
+        raise AssertionError(f"прокол блока не засчитан {poke_stats}")
