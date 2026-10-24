@@ -7,10 +7,11 @@ CISDDetector в cisdbot, профиль tf1. Сверху две вещи:
 - свеча, от которой серия пошла в свип (она и есть Единорог);
 - FVG на свече слома и пересечение с диапазоном этой свечи.
 
-Лонг: нижний свип, медвежья серия, бычья свеча слева от неё.
-Слом — бычье закрытие выше хая всей пачки от свечи Единорога
-до бара свипа, оба края включительно. Лимитка остаётся на хай
-самой свечи Единорога, стоп за её лоу. Шорт — зеркало.
+Лонг: нижний свип, медвежья серия, бычий бар слева от неё.
+Единорог — этот бар и все бычьи бары подряд влево, до первого
+медвежьего. Слом — бычье закрытие выше хая от левого бара
+Единорога до бара свипа, обе свечи в окне. Лимитка на хай
+всего блока, стоп за его лоу. Шорт — зеркало.
 """
 from __future__ import annotations
 
@@ -30,9 +31,27 @@ MAX_RANGE = 50
 CONFIRM_WINDOWS = 2
 
 
-def _series_extreme(df: pd.DataFrame, uni: int, trigger: int, long_side: bool) -> float:
-    """Хай лонга или лоу шорта от свечи Единорога до бара свипа, оба края включительно."""
-    window = df.iloc[int(uni):int(trigger) + 1]
+def _block_left(df: pd.DataFrame, origin: int, long_side: bool) -> int:
+    """Левый край блока Единорога. Вправо уже лежит бар у серии.
+
+    Лонг: идём влево, пока свечи бычьи, и встаём перед первой медвежьей.
+    Дожи не бычья, пачку она обрывает. Шорт — зеркало.
+    """
+    left = int(origin)
+    while left > 0:
+        o = float(df.iloc[left - 1]["open"])
+        c = float(df.iloc[left - 1]["close"])
+        if long_side and c <= o:
+            break
+        if not long_side and c >= o:
+            break
+        left -= 1
+    return left
+
+
+def _series_extreme(df: pd.DataFrame, left: int, trigger: int, long_side: bool) -> float:
+    """Хай лонга или лоу шорта от левой свечи Единорога до бара свипа."""
+    window = df.iloc[int(left):int(trigger) + 1]
     if long_side:
         return float(window["high"].max())
     return float(window["low"].min())
@@ -55,9 +74,9 @@ def _origin(df: pd.DataFrame, start_index, long_side: bool) -> int | None:
 
 
 def _fvg_overlap(
-    df: pd.DataFrame, mss_i: int, uni_i: int, long_side: bool,
+    df: pd.DataFrame, mss_i: int, left: int, right: int, long_side: bool,
 ) -> tuple[float, float] | None:
-    """FVG на свече слома и кусок, общий с диапазоном Единорога."""
+    """FVG на свече слома и кусок, общий с диапазоном блока Единорога."""
     if mss_i < 2:
         return None
     hi = df["high"]
@@ -72,8 +91,9 @@ def _fvg_overlap(
             return None
         f_lo = float(hi.iloc[mss_i])
         f_hi = float(lo.iloc[mss_i - 2])
-    u_lo = float(lo.iloc[uni_i])
-    u_hi = float(hi.iloc[uni_i])
+    block = df.iloc[int(left):int(right) + 1]
+    u_lo = float(block["low"].min())
+    u_hi = float(block["high"].max())
     top = min(f_hi, u_hi)
     bot = max(f_lo, u_lo)
     if top <= bot:
@@ -176,6 +196,7 @@ def find_setups(
         if uni is None or uni >= trigger:
             stats["no_origin"] += 1
             continue
+        left = _block_left(m15, uni, long_side)
         if unicorn_mid_swing:
             # ПОПРАВКА 14.10.2026: единорог — средняя (вторая) свеча трехсвечного свинга.
             if uni < 1:
@@ -191,7 +212,7 @@ def find_setups(
             if not ok_swing:
                 stats["no_midswing"] += 1
                 continue
-        level = _series_extreme(m15, uni, trigger, long_side)
+        level = _series_extreme(m15, left, trigger, long_side)
         mss = det.find_confirmation(
             m15,
             trigger,
@@ -205,8 +226,9 @@ def find_setups(
         if unicorn_clean_body:
             # ПОПРАВКА 14.10.2026: после свипа и до бара слома (оба края исключая)
             # ни одна свеча не перекрывает ТЕЛОМ тело единорога.
-            u_lo_b = min(float(m15.iloc[uni]["open"]), float(m15.iloc[uni]["close"]))
-            u_hi_b = max(float(m15.iloc[uni]["open"]), float(m15.iloc[uni]["close"]))
+            bodies = m15.iloc[left:uni + 1]
+            u_lo_b = float(bodies[["open", "close"]].min(axis=1).min())
+            u_hi_b = float(bodies[["open", "close"]].max(axis=1).max())
             dirty = False
             for k in range(trigger + 1, int(mss)):
                 kb_lo = min(float(m15.iloc[k]["open"]), float(m15.iloc[k]["close"]))
@@ -223,7 +245,7 @@ def find_setups(
         if fvg_in_sweep and not _fvg_inside_sweep(m15, htf_time, int(mss), htf_min):
             stats["fvg_out"] += 1
             continue
-        zone = _fvg_overlap(m15, int(mss), uni, long_side)
+        zone = _fvg_overlap(m15, int(mss), left, uni, long_side)
         if zone is None:
             stats["no_fvg"] += 1
             continue
@@ -240,8 +262,13 @@ def find_setups(
                 continue
             last_short = dedup
         seen.add(key)
-        entry = float(m15.iloc[uni]["high"] if long_side else m15.iloc[uni]["low"])
-        stop = float(m15.iloc[uni]["low"] if long_side else m15.iloc[uni]["high"])
+        block = m15.iloc[left:uni + 1]
+        if long_side:
+            entry = float(block["high"].max())
+            stop = float(block["low"].min())
+        else:
+            entry = float(block["low"].min())
+            stop = float(block["high"].max())
         if entry == stop:
             continue
         setups.append(
@@ -253,6 +280,7 @@ def find_setups(
                 "stop": stop,
                 "sweep_i": trigger,
                 "ob_i": uni,
+                "ob_left": left,
                 "h4": 0,
                 "zone_bot": zone[0],
                 "zone_top": zone[1],
@@ -310,3 +338,20 @@ def check_setup() -> None:
     bumped, _ = find_setups(higher)
     if any(s["side"] == 1 and s["ob_i"] == 70 for s in bumped):
         raise AssertionError(f"слом взял хай единорога, а не пачки, {bumped}")
+    # Бар 69 бычий и выше 70-го, бар 68 медвежий — в блок входит только 69–70.
+    wide = df.copy()
+    wide.iloc[67, wide.columns.get_loc("open")] = 100.0
+    wide.iloc[67, wide.columns.get_loc("close")] = 110.0
+    wide.iloc[67, wide.columns.get_loc("high")] = 130.0
+    wide.iloc[68, wide.columns.get_loc("open")] = 120.0
+    wide.iloc[68, wide.columns.get_loc("close")] = 110.0
+    wide.iloc[69, wide.columns.get_loc("open")] = 104.0
+    wide.iloc[69, wide.columns.get_loc("close")] = 110.0
+    wide.iloc[69, wide.columns.get_loc("high")] = 116.0
+    wide.iloc[69, wide.columns.get_loc("low")] = 103.0
+    packed, _ = find_setups(wide)
+    pack = [s for s in packed if s["side"] == 1 and s["ob_i"] == 70]
+    if len(pack) != 1 or pack[0]["ob_left"] != 69:
+        raise AssertionError(f"блок единорога {pack}")
+    if abs(pack[0]["entry"] - 116.0) > 1e-9 or abs(pack[0]["stop"] - 101.0) > 1e-9:
+        raise AssertionError(f"край блока {pack[0]}")
