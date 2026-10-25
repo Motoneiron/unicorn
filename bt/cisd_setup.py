@@ -12,8 +12,10 @@ CISDDetector в cisdbot, профиль tf1. Сверху две вещи:
 Единорог — этот бар и все бычьи бары подряд влево, до первого
 медвежьего. Слом — бычье закрытие выше хая всей пачки от баров
 единорога до бара свипа, оба края входят в окно. Лимитка на хай
-блока, стоп за его лоу. Если бар блока сам поставил экстремум
-4ч свечи и следующая 4ч его сняла — сетапа нет.
+блока, стоп за его лоу. Между пачкой и FVG фитили не закрывают
+всё пересечение зон: часть FVG должна смотреть на блок напрямую.
+Если бар блока сам поставил экстремум 4ч свечи и следующая 4ч
+его сняла — сетапа нет.
 Шорт — зеркало.
 """
 from __future__ import annotations
@@ -130,6 +132,42 @@ def _fvg_overlap(
     return bot, top
 
 
+def _sight_open(df: pd.DataFrame, trigger: int, mss_i: int, bot: float, top: float) -> bool:
+    """Часть пересечения FVG и блока не закрыта фитилями между пачкой и FVG.
+
+    Пачка кончается баром свипа. Бары самой тройки в зазор не входят.
+    """
+    first = int(mss_i) - 2
+    if first <= int(trigger):
+        return True
+    covered: list[tuple[float, float]] = []
+    for i in range(int(trigger) + 1, first):
+        lo = float(df.iloc[i]["low"])
+        hi = float(df.iloc[i]["high"])
+        if hi <= bot or lo >= top:
+            continue
+        covered.append((max(lo, bot), min(hi, top)))
+    if not covered:
+        return True
+    covered.sort()
+    spans: list[tuple[float, float]] = []
+    cur_lo, cur_hi = covered[0]
+    eps = 1e-8
+    for lo, hi in covered[1:]:
+        if lo > cur_hi + eps:
+            spans.append((cur_lo, cur_hi))
+            cur_lo, cur_hi = lo, hi
+        else:
+            cur_hi = max(cur_hi, hi)
+    spans.append((cur_lo, cur_hi))
+    cursor = bot
+    for lo, hi in spans:
+        if lo > cursor + eps:
+            return True
+        cursor = max(cursor, hi)
+    return cursor < top - eps
+
+
 def _fvg_inside_sweep(m15: pd.DataFrame, htf_time, mss_i: int, htf_min: int) -> bool:
     """Три бара подтверждающего FVG открылись внутри свечи свипа."""
     if mss_i < 2:
@@ -194,6 +232,7 @@ def find_setups(
         "fvg_out": 0,
         "skip_out": 0,
         "uni_extreme": 0,
+        "no_sight": 0,
         "kept": 0,
     }
     setups: list[dict] = []
@@ -285,6 +324,9 @@ def find_setups(
         zone = _fvg_overlap(m15, int(mss), left, uni, long_side)
         if zone is None:
             stats["no_fvg"] += 1
+            continue
+        if not _sight_open(m15, trigger, int(mss), zone[0], zone[1]):
+            stats["no_sight"] += 1
             continue
         key = (1 if long_side else -1, uni, int(mss))
         if key in seen:
@@ -425,3 +467,28 @@ def check_setup() -> None:
     bumped, _ = find_setups(higher)
     if any(s["side"] == 1 and s["ob_i"] == 70 for s in bumped):
         raise AssertionError(f"слом взял хай единорога, а не пачки, {bumped}")
+    # После свипа фитиль закрыл всё пересечение, слома нет, потом FVG и слом.
+    blocked = df.copy()
+    later = {
+        75: (94.0, 112.0, 100.0, 105.0),
+        76: (100.0, 102.0, 98.0, 101.0),
+        77: (101.0, 110.0, 100.0, 108.0),
+        78: (112.0, 120.0, 111.0, 118.0),
+    }
+    for i, (op, hi, lo, cl) in later.items():
+        blocked.iloc[i, blocked.columns.get_loc("open")] = op
+        blocked.iloc[i, blocked.columns.get_loc("high")] = hi
+        blocked.iloc[i, blocked.columns.get_loc("low")] = lo
+        blocked.iloc[i, blocked.columns.get_loc("close")] = cl
+    blind, blind_stats = find_setups(blocked)
+    if any(s["side"] == 1 and s["ob_i"] == 70 for s in blind):
+        raise AssertionError(f"фитиль закрыл вид на единорога {blind}")
+    if blind_stats["no_sight"] < 1:
+        raise AssertionError(f"закрытый вид не отсеян {blind_stats}")
+    # Тот же заход, но фитиль оставляет кусок пересечения открытым.
+    open_sight = blocked.copy()
+    open_sight.iloc[75, open_sight.columns.get_loc("high")] = 105.0
+    seen_part, _ = find_setups(open_sight)
+    part = [s for s in seen_part if s["side"] == 1 and s["ob_i"] == 70]
+    if len(part) != 1 or part[0]["form_i"] != 78:
+        raise AssertionError(f"открытый кусок зоны {part}")
