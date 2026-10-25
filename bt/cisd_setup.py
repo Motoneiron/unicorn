@@ -10,9 +10,10 @@ CISDDetector в cisdbot, профиль tf1. Сверху две вещи:
 
 Лонг: нижний свип, медвежья серия, бычий бар слева от неё.
 Единорог — этот бар и все бычьи бары подряд влево, до первого
-медвежьего. Слом — бычье закрытие выше хая блока. Лимитка на
-этот хай, стоп за лоу блока. Если бар блока сам поставил
-экстремум 4ч свечи и следующая 4ч его сняла — сетапа нет.
+медвежьего. Слом — бычье закрытие выше хая всей пачки от баров
+единорога до бара свипа, оба края входят в окно. Лимитка на хай
+блока, стоп за его лоу. Если бар блока сам поставил экстремум
+4ч свечи и следующая 4ч его сняла — сетапа нет.
 Шорт — зеркало.
 """
 from __future__ import annotations
@@ -75,6 +76,14 @@ def _block_holds_swept_extreme(
         if abs(float(df.iloc[i][col]) - level) <= eps:
             return True
     return False
+
+
+def _series_extreme(df: pd.DataFrame, left: int, trigger: int, long_side: bool) -> float:
+    """Хай лонга или лоу шорта от левого бара блока до бара свипа."""
+    window = df.iloc[int(left):int(trigger) + 1]
+    if long_side:
+        return float(window["high"].max())
+    return float(window["low"].min())
 
 
 def _origin(df: pd.DataFrame, start_index, long_side: bool) -> int | None:
@@ -237,11 +246,7 @@ def find_setups(
             if not ok_swing:
                 stats["no_midswing"] += 1
                 continue
-        block = m15.iloc[left:uni + 1]
-        if long_side:
-            level = float(block["high"].max())
-        else:
-            level = float(block["low"].min())
+        level = _series_extreme(m15, left, trigger, long_side)
         mss = det.find_confirmation(
             m15,
             trigger,
@@ -414,3 +419,9 @@ def check_setup() -> None:
         raise AssertionError(f"FVG начался до свипа {early_kept}")
     if early_stats["fvg_early"] < 1:
         raise AssertionError(f"ранний FVG не отсеян {early_stats}")
+    # Бар после единорога выше его хая: закрытие 118 над 112 уже не слом.
+    higher = df.copy()
+    higher.iloc[71, higher.columns.get_loc("high")] = 119.0
+    bumped, _ = find_setups(higher)
+    if any(s["side"] == 1 and s["ob_i"] == 70 for s in bumped):
+        raise AssertionError(f"слом взял хай единорога, а не пачки, {bumped}")
