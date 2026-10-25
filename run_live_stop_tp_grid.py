@@ -306,6 +306,7 @@ def run_pair(
     out_dir: Path,
     from_ts: str | None = None,
     to_ts: str | None = None,
+    configs: tuple = CONFIGS,
 ) -> list[dict]:
     m1 = load_ms(path)
     m15 = resample(m1, "15min", 15)
@@ -326,7 +327,7 @@ def run_pair(
     if to_ts:
         end_j = min(end_j, _search(op15, np.datetime64(pd.Timestamp(to_ts))))
 
-    portfolios = [Portfolio(*cfg) for cfg in CONFIGS]
+    portfolios = [Portfolio(*cfg) for cfg in configs]
     t0 = time.perf_counter()
     for j in range(start_j, end_j):
         now64 = op15[j] + min15
@@ -429,15 +430,20 @@ def main() -> None:
     parser.add_argument("--to", dest="to_ts", default=None)
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--out", default=str(RUNS))
+    parser.add_argument("--configs", default="")
     args = parser.parse_args()
 
     selected = {x.strip().upper() for x in args.pairs.split(",") if x.strip()}
+    want = {x.strip() for x in args.configs.split(",") if x.strip()}
+    configs = tuple(cfg for cfg in CONFIGS if not want or cfg[0] in want)
+    if not configs:
+        raise SystemExit("Нет выбранных клеток")
     out_dir = Path(args.out)
     tasks = []
     for key, _label, path in DATA_PAIRS:
         if key == "BTC" or (selected and key not in selected):
             continue
-        tasks.append((key, Path(path), args.window, out_dir, args.from_ts, args.to_ts))
+        tasks.append((key, Path(path), args.window, out_dir, args.from_ts, args.to_ts, configs))
     if not tasks:
         raise SystemExit("Нет выбранных пар")
 
