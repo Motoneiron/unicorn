@@ -10,12 +10,9 @@ CISDDetector в cisdbot, профиль tf1. Сверху две вещи:
 
 Лонг: нижний свип, медвежья серия, бычий бар слева от неё.
 Единорог — этот бар и все бычьи бары подряд влево, до первого
-медвежьего. Слом — бычье закрытие выше хая от левого бара
-Единорога до бара свипа, обе свечи в окне. Лимитка на хай
-всего блока, стоп за его лоу. Если бар блока сам поставил
+медвежьего. Слом — бычье закрытие выше хая блока. Лимитка на
+этот хай, стоп за лоу блока. Если бар блока сам поставил
 экстремум 4ч свечи и следующая 4ч его сняла — сетапа нет.
-Если фитиль обновил экстремум блока, а FVG ещё не закрылся — сетап гаснет.
-Если FVG уже был, ждём закрытие за экстремум пачки от Единорога до свипа.
 Шорт — зеркало.
 """
 from __future__ import annotations
@@ -78,62 +75,6 @@ def _block_holds_swept_extreme(
         if abs(float(df.iloc[i][col]) - level) <= eps:
             return True
     return False
-
-
-def _first_break(
-    df: pd.DataFrame,
-    left: int,
-    uni: int,
-    trigger: int,
-    level: float,
-    long_side: bool,
-    end: int,
-    htf_time,
-    htf_min: int,
-    fvg_in_sweep: bool,
-) -> tuple[str, int, int]:
-    """Сначала FVG после свипа, потом закрытие за экстремум пачки.
-
-    Фитиль за экстремум блока до уже закрытого FVG гасит сетап.
-    Сам бар FVG этот экстремум обновлять не может: разрыв должен быть раньше.
-    """
-    block = df.iloc[int(left):int(uni) + 1]
-    ext = float(block["high"].max() if long_side else block["low"].min())
-    seen = False
-    fvg_i = -1
-    for i in range(int(uni) + 1, int(end)):
-        row = df.iloc[i]
-        o = float(row["open"])
-        h = float(row["high"])
-        lo = float(row["low"])
-        c = float(row["close"])
-        if long_side:
-            updated = h > ext
-            broke = c > o and c > level
-        else:
-            updated = lo < ext
-            broke = c < o and c < level
-        if updated and not seen:
-            return "ran", i, -1
-        if (
-            not seen
-            and i - 2 >= int(trigger)
-            and (not fvg_in_sweep or _fvg_inside_sweep(df, htf_time, i, htf_min))
-            and _fvg_overlap(df, i, left, uni, long_side) is not None
-        ):
-            seen = True
-            fvg_i = i
-        if seen and broke:
-            return "mss", i, fvg_i
-    return "none", -1, -1
-
-
-def _series_extreme(df: pd.DataFrame, left: int, trigger: int, long_side: bool) -> float:
-    """Хай лонга или лоу шорта от левой свечи Единорога до бара свипа."""
-    window = df.iloc[int(left):int(trigger) + 1]
-    if long_side:
-        return float(window["high"].max())
-    return float(window["low"].min())
 
 
 def _origin(df: pd.DataFrame, start_index, long_side: bool) -> int | None:
@@ -237,7 +178,6 @@ def find_setups(
         "no_origin": 0,
         "no_midswing": 0,
         "no_mss": 0,
-        "uni_run": 0,
         "dirty_body": 0,
         "extremum": 0,
         "no_fvg": 0,
@@ -297,22 +237,19 @@ def find_setups(
             if not ok_swing:
                 stats["no_midswing"] += 1
                 continue
-        level = _series_extreme(m15, left, trigger, long_side)
-        end = min(
-            trigger + det.max_range + 1,
-            len(m15),
-            det._confirm_end_iloc_exclusive_by_htf(
-                m15, trigger, htf_anchor=htf_time,
-            ),
+        block = m15.iloc[left:uni + 1]
+        if long_side:
+            level = float(block["high"].max())
+        else:
+            level = float(block["low"].min())
+        mss = det.find_confirmation(
+            m15,
+            trigger,
+            level,
+            is_bearish=not long_side,
+            htf_anchor=htf_time,
         )
-        kind, mss, fvg_i = _first_break(
-            m15, left, uni, trigger, level, long_side, end,
-            htf_time, htf_min, fvg_in_sweep,
-        )
-        if kind == "ran":
-            stats["uni_run"] += 1
-            continue
-        if kind != "mss":
+        if mss is None:
             stats["no_mss"] += 1
             continue
         if unicorn_clean_body:
@@ -334,7 +271,13 @@ def find_setups(
         if det.is_extremum_updated(m15, trigger, int(mss), not long_side):
             stats["extremum"] += 1
             continue
-        zone = _fvg_overlap(m15, int(fvg_i), left, uni, long_side)
+        if fvg_in_sweep and not _fvg_inside_sweep(m15, htf_time, int(mss), htf_min):
+            stats["fvg_out"] += 1
+            continue
+        if int(mss) - 2 < trigger:
+            stats["fvg_early"] += 1
+            continue
+        zone = _fvg_overlap(m15, int(mss), left, uni, long_side)
         if zone is None:
             stats["no_fvg"] += 1
             continue
@@ -393,15 +336,14 @@ def check_setup() -> None:
     l[55] = 100.0
     c[63] = 105.0
     o[63] = 108.0
-    # 16:00+: бычья свеча 70, медвежья серия, снятие на 74.
-    # FVG на 76, пока хай блока 112 не пробит. Закрытие за пачку на 77.
+    # 16:00+: бычья свеча 70, медвежья серия, снятие на 74, слом с FVG на 77.
     o[70], h[70], l[70], c[70] = 102.0, 112.0, 101.0, 108.0
     o[71], h[71], l[71], c[71] = 108.0, 109.0, 104.0, 105.0
     o[72], h[72], l[72], c[72] = 105.0, 106.0, 100.0, 101.0
     o[73], h[73], l[73], c[73] = 101.0, 102.0, 96.0, 97.0
     o[74], h[74], l[74], c[74] = 97.0, 98.0, 90.0, 94.0
     o[75], h[75], l[75], c[75] = 94.0, 100.0, 93.0, 99.0
-    o[76], h[76], l[76], c[76] = 106.0, 110.0, 105.0, 109.0
+    o[76], h[76], l[76], c[76] = 99.0, 110.0, 98.0, 109.0
     o[77], h[77], l[77], c[77] = 109.0, 120.0, 111.0, 118.0
     c[79] = 115.0
     o[79] = 114.0
@@ -422,12 +364,6 @@ def check_setup() -> None:
     inside = [s for s in kept if s["side"] == 1 and s["ob_i"] == 70]
     if len(inside) != 1:
         raise AssertionError(f"FVG этого примера внутри свечи свипа, {inside}")
-    # Бар после единорога выше его хая: закрытие 118 над 112 уже не слом.
-    higher = df.copy()
-    higher.iloc[71, higher.columns.get_loc("high")] = 119.0
-    bumped, _ = find_setups(higher)
-    if any(s["side"] == 1 and s["ob_i"] == 70 for s in bumped):
-        raise AssertionError(f"слом взял хай единорога, а не пачки, {bumped}")
     # Бар 69 бычий и выше 70-го, бар 68 медвежий — в блок входит только 69–70.
     wide = df.copy()
     wide.iloc[67, wide.columns.get_loc("open")] = 100.0
@@ -476,13 +412,5 @@ def check_setup() -> None:
     early_kept, early_stats = find_setups(early)
     if any(s["side"] == 1 and s["ob_i"] == 70 for s in early_kept):
         raise AssertionError(f"FVG начался до свипа {early_kept}")
-    if early_stats["uni_run"] < 1 and early_stats["fvg_early"] < 1:
+    if early_stats["fvg_early"] < 1:
         raise AssertionError(f"ранний FVG не отсеян {early_stats}")
-    # Фитиль выше блока на баре до слома: поздний слом уже не ищем.
-    poked = df.copy()
-    poked.iloc[76, poked.columns.get_loc("high")] = 113.0
-    poke_kept, poke_stats = find_setups(poked)
-    if any(s["side"] == 1 and s["ob_i"] == 70 for s in poke_kept):
-        raise AssertionError(f"фитиль за блок не погасил сетап {poke_kept}")
-    if poke_stats["uni_run"] < 1:
-        raise AssertionError(f"прокол блока не засчитан {poke_stats}")
